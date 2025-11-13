@@ -29,14 +29,14 @@ This Python client enables automated testing of the **Vonage Pipecat WebSocket s
     ```
 
 5. **Start an Opentok Session and Publish a stream**
-    The OpenTok Session ID is required. 
-    Note: You can open the OpenTok Playground (or your own app) to create an opentok session and publish a stream.
+    The Session ID is required. 
+    Note: You can use either opentok or vonage platform to create the session. Open the Playground (or your own app) to create a session and publish a stream.
     Copy the Session ID and set it in `.env` file:
     ```sh
     VONAGE_SESSION_ID=<paste-your-session-id-here>
     ```
 
-    Set OPENTOK_API_URL in your .env:
+    If you are using Opentok platform, set OPENTOK_API_URL in your .env:
     ```sh
     OPENTOK_API_URL=https://api.opentok.com
     ```
@@ -58,16 +58,41 @@ This Python client enables automated testing of the **Vonage Pipecat WebSocket s
     # API base
     OPENTOK_API_URL=https://api.opentok.com
 
-    # Keep rest as same.
+     # Keep rest as same.
+    ```
+   If you created the session in Vonage platform, set the following in your `.env`:
+
+    ```sh
+    # Vonage (OpenTok) credentials
+    VONAGE_APPLICATION_ID=YOUR_APPLICATION_ID
+    VONAGE_PRIVATE_KEY=YOUR_PRIVATE_KEY_PATH
+   
+    # Your Pipecat WebSocket endpoint (ngrok or prod)
+    WS_URI=wss://<your-ngrok-domain>
+   
+    # Put existing session from playground or app which you want to connect pipecat-ai
+    VONAGE_SESSION_ID=1_MX4....
+   
+    # API base
+    VONAGE_API_URL=api.vonage.com
+   
+   # Keep rest as same.
     ```
 
 7. **Start your Pipecat WS server**:
     Make sure the Vonage Pipecat server is running locally and exposes a WS endpoint via ngrok
 
 8. **Running the Client**:
-    Below program will connect the opentok session created above to the pipecat-ai pipeline.
+    Below program will connect the opentok session created above to the pipecat-ai pipeline. 
+
+    If you are using the opentok platform, run:
     ```sh
     python connect_and_stream.py
+    ```
+   
+    If you are using the Vonage platform, run:
+    ```sh
+    python connect_and_stream_vonage.py
     ```
 
 **Note** 
@@ -77,4 +102,7 @@ You can still override via flags if you want, e.g.:
     ```sh
     # Example
     python connect_and_stream.py --ws-uri wss://my-ngrok/ws --audio-rate 16000
+
+    # OR
+    python connect_and_stream_vonage.py --ws-uri wss://my-ngrok/ws --audio-rate 16000
     ```
