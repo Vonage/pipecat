@@ -4,9 +4,10 @@
 import asyncio
 import itertools
 from dataclasses import dataclass, replace
-from typing import Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional, cast
 
 import numpy as np
+import numpy.typing as npt
 from loguru import logger
 
 from pipecat.audio.resamplers.base_audio_resampler import BaseAudioResampler
@@ -34,6 +35,7 @@ try:
         PublisherSettings,
         Session,
         SessionAudioSettings,
+        SessionAVSettings,
         SessionSettings,
         Stream,
         Subscriber,
@@ -66,7 +68,7 @@ class VonageException(Exception):
     pass
 
 
-async def async_noop(*args, **kwargs):
+async def async_noop(*args: Any, **kwargs: Any) -> None:
     """No operation async function."""
     pass
 
@@ -94,6 +96,24 @@ class VonageClientListener:
     on_stream_dropped: Callable[[Session, Stream], Awaitable[None]] = async_noop
     on_subscriber_connected: Callable[[Subscriber], Awaitable[None]] = async_noop
     on_subscriber_disconnected: Callable[[Subscriber], Awaitable[None]] = async_noop
+
+
+@dataclass
+class VonagePublisherSettings:
+    """Settings for the Vonage publisher.
+
+    Parameters:
+        name: Name of the publisher stream.
+        has_audio: Whether the publisher has audio.
+        has_video: Whether the publisher has video.
+        audio_settings: Audio settings for the publisher.
+    """
+
+    name: str = ""
+    has_audio: bool = False
+    has_video: bool = False
+    enable_stereo_mode: bool = True
+    enable_opus_dtx: bool = False
 
 
 @dataclass
@@ -135,7 +155,7 @@ class VonageClient:
         session_id: str,
         token: str,
         params: VonageClientParams,
-        publisher_settings: Optional[PublisherSettings] = None,
+        publisher_settings: VonagePublisherSettings,
     ):
         """Initialize the Vonage client.
 
@@ -153,10 +173,10 @@ class VonageClient:
         self._params = params
         self._connected: bool = False
         self._connection_counter: int = 0
-        self._listener_id_gen: itertools.count = itertools.count()
+        self._listener_id_gen: itertools.count[int] = itertools.count()
         self._listeners: dict[int, VonageClientListener] = {}
-        self._publish_ready: Optional[asyncio.Future] = None
-        self._publisher_settings: Optional[PublisherSettings] = publisher_settings
+        self._publish_ready: Optional[asyncio.Future[None]] = None
+        self._publisher_settings: VonagePublisherSettings = publisher_settings
         self._publisher: Optional[Publisher] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._session = Session(id=session_id)
@@ -182,7 +202,7 @@ class VonageClient:
         self._listeners[listener_id] = listener
         return listener_id
 
-    def remove_listener(self, listener_id: int):
+    def remove_listener(self, listener_id: int) -> None:
         """Remove a listener from the Vonage client.
 
         Args:
@@ -190,46 +210,45 @@ class VonageClient:
         """
         self._listeners.pop(listener_id, None)
 
-    async def connect(self, listener: VonageClientListener) -> int:
-        """Connect to the Vonage session.
-
-        Args:
-            listener: Listener for session events.
-
-        Returns:
-            The unique ID assigned to the listener.
-        """
+    async def connect(self) -> None:
+        """Connect to the Vonage session."""
         logger.info(f"Connecting with session string {self._session_id}")
 
-        listener_id: int = self.add_listener(listener)
         if self._connected:
             logger.info(f"Already connected to {self._session_id}")
-
-            # if we've already connected refcount the times we've connected
             self._connection_counter += 1
-            await listener.on_connected(self._session)
-            return listener_id
+            return
 
         if self._publish_ready is not None:
             logger.info(f"Already connecting to {self._session_id}")
 
             # if we already connecting, await for the publish ready event
             await self._publish_ready
-            return listener_id
+            self._connection_counter += 1
+            return
 
-        if self._publisher_settings:
-            loop = asyncio.get_running_loop()
-            self._loop = loop
-            self._publish_ready: asyncio.Future = loop.create_future()
+        loop = asyncio.get_running_loop()
+        self._loop = loop
+
+        # when audio publishing is enabled we need to wait for the session to be ready for audio
+        # however, if only video is being published we don't need to wait
+        if self._publisher_settings.has_audio:
+            self._publish_ready = loop.create_future()
 
         if not self._client.connect(
             application_id=self._application_id,
             session_id=self._session_id,
             token=self._token,
             session_settings=SessionSettings(
-                audio=SessionAudioSettings(
-                    sample_rate=self._params.audio_out_sample_rate,
-                    number_of_channels=self._params.audio_out_channels,
+                av=SessionAVSettings(
+                    audio_input=SessionAudioSettings(
+                        sample_rate=self._params.audio_out_sample_rate,
+                        number_of_channels=self._params.audio_out_channels,
+                    ),
+                    audio_output=SessionAudioSettings(
+                        sample_rate=self._params.audio_in_sample_rate,
+                        number_of_channels=self._params.audio_in_channels,
+                    ),
                 ),
                 enable_migration=self._params.enable_migration,
                 logging=LoggingSettings(level="INFO"),
@@ -251,18 +270,20 @@ class VonageClient:
             await self._publish_ready
 
         self._connected = True
+        self._connection_counter += 1
         await self._on_session_connected()
-        return listener_id
 
-    async def disconnect(self, listener_id: int):
-        """Disconnect from the Vonage session.
-
-        Args:
-            listener_id: The ID of the listener to disconnect.
-        """
-        self._connection_counter -= 1
-        if not self._connected or self._connection_counter != 0:
+    async def disconnect(self) -> None:
+        """Disconnect from the Vonage session."""
+        if not self._connected:
             logger.info(f"Already disconnected from {self._session_id}")
+            return
+
+        self._connection_counter -= 1
+        if self._connection_counter != 0:
+            logger.info(
+                f"{self._connection_counter} connections still active for {self._session_id}"
+            )
             return
 
         logger.info(f"Disconnecting from {self._session_id}")
@@ -272,22 +293,21 @@ class VonageClient:
             self._publisher = None
 
         self._client.disconnect()
+        self._connected = False
+
+        logger.info(f"Disconnected from {self._session_id}")
 
         for listener in self._listeners.values():
             await listener.on_disconnected(self._session)
 
-        self._listeners.pop(listener_id, None)
-
-        logger.info(f"Disconnected from {self._session_id}")
-
-    async def write_audio(self, raw_audio_frame: bytes):
+    async def write_audio(self, raw_audio_frame: bytes) -> bool:
         """Write audio data to the Vonage session.
 
         Args:
             raw_audio_frame: Raw PCM audio data to inject into the session.
         """
         frame_count = len(raw_audio_frame) // (self._params.audio_out_channels * 2)
-        self._client.inject_audio(
+        return self._client.add_audio(
             AudioData(
                 sample_buffer=memoryview(raw_audio_frame).cast("h"),
                 number_of_frames=frame_count,
@@ -296,64 +316,83 @@ class VonageClient:
             )
         )
 
-    async def _on_session_connected(self):
+    async def _on_session_connected(self) -> None:
         for listener in self._listeners.values():
             await listener.on_connected(self._session)
 
-    def _on_session_ready_for_audio_cb(self, session: Session):
+    def _on_session_ready_for_audio_cb(self, session: Session) -> None:
         logger.info(f"Session {session.id} ready to publish")
         if self._publish_ready:
             future = self._publish_ready
             self._publish_ready = None
-            self._loop.call_soon_threadsafe(future.set_result, None)
+            self._call_soon_threadsafe(lambda: future.set_result(None))
 
-    def _on_session_error_cb(self, session: Session, description: str, code: int):
+    def _call_soon_threadsafe(self, callback: Callable[[], Any]) -> None:
+        if self._loop:
+            self._loop.call_soon_threadsafe(callback)
+
+    def _on_session_error_cb(self, session: Session, description: str, code: int) -> None:
         logger.warning(f"Session error {session.id} code={code} description={description}")
-        self._loop.call_soon_threadsafe(
+        self._call_soon_threadsafe(
             lambda: asyncio.create_task(self._on_session_error_async_cb(session, description, code))
         )
 
-    async def _on_session_error_async_cb(self, session: Session, description: str, code: int):
+    async def _on_session_error_async_cb(
+        self, session: Session, description: str, code: int
+    ) -> None:
         for listener in self._listeners.values():
-            await listener.on_error(session.id, description, code)
+            await listener.on_error(session, description, code)
 
-    def _on_session_connected_cb(self, session: Session):
+    def _on_session_connected_cb(self, session: Session) -> None:
         logger.info(f"Session connected {session.id}")
         self._session = session
-        self._client.publish(
-            settings=self._publisher_settings,
-            on_error_cb=self._on_publisher_error_cb,
-            on_stream_created_cb=self._on_publisher_stream_created_cb,
-            on_stream_destroyed_cb=self._on_publisher_stream_destroyed_cb,
-        )
+        if self._publisher_settings.has_audio or self._publisher_settings.has_video:
+            logger.info(
+                f"Publishing audio={self._publisher_settings.has_audio} video={self._publisher_settings.has_video} for session {session.id}"
+            )
+            self._client.publish(
+                settings=PublisherSettings(
+                    name=self._publisher_settings.name,
+                    audio_settings=PublisherAudioSettings(
+                        enable_stereo_mode=self._publisher_settings.enable_stereo_mode,
+                        enable_opus_dtx=self._publisher_settings.enable_opus_dtx,
+                    ),
+                    has_audio=self._publisher_settings.has_audio,
+                    has_video=self._publisher_settings.has_video,
+                ),
+                on_error_cb=self._on_publisher_error_cb,
+                on_stream_created_cb=self._on_publisher_stream_created_cb,
+                on_stream_destroyed_cb=self._on_publisher_stream_destroyed_cb,
+            )
+        else:
+            logger.info(f"No audio or video to publish for session {session.id}")
 
-    def _on_session_disconnected_cb(self, session: Session):
+    def _on_session_disconnected_cb(self, session: Session) -> None:
         logger.info(f"Session disconnected {session.id}")
         self._connected = False
 
-    def _on_publisher_error_cb(self, publisher: Publisher, description: str, code: int):
+    def _on_publisher_error_cb(self, publisher: Publisher, description: str, code: int) -> None:
         logger.warning(
             f"Publisher error session={self._session_id} publisher={publisher.stream.id} "
             f"code={code} description={description}"
         )
 
-    def _on_publisher_stream_created_cb(self, publisher: Publisher):
+    def _on_publisher_stream_created_cb(self, publisher: Publisher) -> None:
         logger.info(
             f"Publisher stream created session={self._session_id} publisher={publisher.stream.id}"
         )
         self._publisher = publisher
 
-    def _on_publisher_stream_destroyed_cb(self, publisher: Publisher):
+    def _on_publisher_stream_destroyed_cb(self, publisher: Publisher) -> None:
         logger.info(
             f"Publisher stream destroyed session={self._session_id} publisher={publisher.stream.id}"
         )
 
-    def _on_session_audio_data_cb(self, session: Session, audio_data: AudioData):
+    def _on_session_audio_data_cb(self, session: Session, audio_data: AudioData) -> None:
         for listener in self._listeners.values():
-            if listener.on_audio_in:
-                listener.on_audio_in(session, audio_data)
+            listener.on_audio_in(session, audio_data)
 
-    def _on_stream_received_cb(self, session: Session, stream: Stream):
+    def _on_stream_received_cb(self, session: Session, stream: Stream) -> None:
         logger.info(f"Stream received session={session.id} stream={stream.id}")
         self._client.subscribe(
             stream,
@@ -361,52 +400,52 @@ class VonageClient:
             on_connected_cb=self._on_subscriber_connected_cb,
             on_disconnected_cb=self._on_subscriber_disconnected_cb,
         )
-        self._loop.call_soon_threadsafe(
+        self._call_soon_threadsafe(
             lambda: asyncio.create_task(self._on_stream_received_async_cb(session, stream))
         )
 
-    async def _on_stream_received_async_cb(self, session: Session, stream: Stream):
+    async def _on_stream_received_async_cb(self, session: Session, stream: Stream) -> None:
         for listener in self._listeners.values():
             await listener.on_stream_received(session, stream)
 
-    def _on_stream_dropped_cb(self, session: Session, stream: Stream):
+    def _on_stream_dropped_cb(self, session: Session, stream: Stream) -> None:
         logger.info(f"Stream dropped session={session.id} stream={stream.id}")
         self._client.unsubscribe(stream)
-        self._loop.call_soon_threadsafe(
+        self._call_soon_threadsafe(
             lambda: asyncio.create_task(self._on_stream_dropped_async_cb(session, stream))
         )
 
-    async def _on_stream_dropped_async_cb(self, session: Session, stream: Stream):
+    async def _on_stream_dropped_async_cb(self, session: Session, stream: Stream) -> None:
         for listener in self._listeners.values():
             await listener.on_stream_dropped(session, stream)
 
-    def _on_subscriber_error_cb(self, subscriber: Subscriber, description: str, code: int):
+    def _on_subscriber_error_cb(self, subscriber: Subscriber, description: str, code: int) -> None:
         logger.info(
             f"Subscriber error session={self._session_id} subscriber={subscriber.stream.id} "
             f"code={code} description={description}"
         )
 
-    def _on_subscriber_connected_cb(self, subscriber: Subscriber):
+    def _on_subscriber_connected_cb(self, subscriber: Subscriber) -> None:
         logger.info(
             f"Subscriber connected session={self._session_id} subscriber={subscriber.stream.id} "
         )
-        self._loop.call_soon_threadsafe(
+        self._call_soon_threadsafe(
             lambda: asyncio.create_task(self._on_subscriber_connected_async_cb(subscriber))
         )
 
-    async def _on_subscriber_connected_async_cb(self, subscriber: Subscriber):
+    async def _on_subscriber_connected_async_cb(self, subscriber: Subscriber) -> None:
         for listener in self._listeners.values():
             await listener.on_subscriber_connected(subscriber)
 
-    def _on_subscriber_disconnected_cb(self, subscriber: Subscriber):
+    def _on_subscriber_disconnected_cb(self, subscriber: Subscriber) -> None:
         logger.info(
             f"Subscriber disconnected session={self._session_id} subscriber={subscriber.stream.id} "
         )
-        self._loop.call_soon_threadsafe(
+        self._call_soon_threadsafe(
             lambda: asyncio.create_task(self._on_subscriber_disconnected_async_cb(subscriber))
         )
 
-    async def _on_subscriber_disconnected_async_cb(self, subscriber: Subscriber):
+    async def _on_subscriber_disconnected_async_cb(self, subscriber: Subscriber) -> None:
         for listener in self._listeners.values():
             await listener.on_subscriber_disconnected(subscriber)
 
@@ -429,10 +468,11 @@ class VonageVideoWebrtcInputTransport(BaseInputTransport):
         super().__init__(params)
         self._initialized: bool = False
         self._client: VonageClient = client
-        self._listener_id: Optional[int] = None
+        self._listener_id: int = -1
         self._resampler = create_stream_resampler()
+        self._connected: bool = False
 
-    async def start(self, frame: StartFrame):
+    async def start(self, frame: StartFrame) -> None:
         """Start the Vonage input transport.
 
         Args:
@@ -446,14 +486,16 @@ class VonageVideoWebrtcInputTransport(BaseInputTransport):
         self._initialized = True
 
         if self._params.audio_in_enabled:
-            self._listener_id: int = await self._client.connect(
+            self._listener_id = self._client.add_listener(
                 VonageClientListener(on_audio_in=self._audio_in_cb)
             )
+            await self._client.connect()
+            self._connected = True
 
         await self.set_transport_ready(frame)
 
-    def _audio_in_cb(self, _session: Session, audio: AudioData):
-        if self._listener_id is not None and self._params.audio_in_enabled:
+    def _audio_in_cb(self, _session: Session, audio: AudioData) -> None:
+        if self._connected and self._params.audio_in_enabled:
             check_audio_data(audio.sample_buffer, audio.number_of_frames, audio.number_of_channels)
 
             audio_sample_rate = audio.sample_rate
@@ -462,7 +504,7 @@ class VonageVideoWebrtcInputTransport(BaseInputTransport):
             # we need to copy the raw audio here as it is a memory view and it will be lost when processed async later
             audio_np = np.frombuffer(audio.sample_buffer, dtype=np.int16)
 
-            async def push_frame():
+            async def push_frame() -> None:
                 # TODO(Toni S): this normalization won't be necessary once VIDMP-1393 is done
                 processed_audio_np = await process_audio(
                     self._resampler,
@@ -487,27 +529,29 @@ class VonageVideoWebrtcInputTransport(BaseInputTransport):
 
             asyncio.run_coroutine_threadsafe(push_frame(), self.get_event_loop())
 
-    async def stop(self, frame: EndFrame):
+    async def stop(self, frame: EndFrame) -> None:
         """Stop the Vonage input transport.
 
         Args:
             frame: The EndFrame to stop the transport.
         """
         await super().stop(frame)
-        if self._listener_id is not None and self._params.audio_in_enabled:
-            listener_id, self._listener_id = self._listener_id, None
-            await self._client.disconnect(listener_id)
+        if self._connected:
+            self._client.remove_listener(self._listener_id)
+            self._connected = False
+            await self._client.disconnect()
 
-    async def cancel(self, frame: CancelFrame):
+    async def cancel(self, frame: CancelFrame) -> None:
         """Cancel the Vonage input transport.
 
         Args:
             frame: The CancelFrame to cancel the transport.
         """
         await super().cancel(frame)
-        if self._listener_id is not None and self._params.audio_in_enabled:
-            listener_id, self._listener_id = self._listener_id, None
-            await self._client.disconnect(listener_id)
+        if self._connected:
+            self._client.remove_listener(self._listener_id)
+            self._connected = False
+            await self._client.disconnect()
 
 
 class VonageVideoWebrtcOutputTransport(BaseOutputTransport):
@@ -529,9 +573,9 @@ class VonageVideoWebrtcOutputTransport(BaseOutputTransport):
         self._initialized: bool = False
         self._resampler = create_stream_resampler()
         self._client = client
-        self._listener_id: Optional[int] = None
+        self._connected: bool = False
 
-    async def start(self, frame: StartFrame):
+    async def start(self, frame: StartFrame) -> None:
         """Start the Vonage output transport.
 
         Args:
@@ -545,17 +589,18 @@ class VonageVideoWebrtcOutputTransport(BaseOutputTransport):
         self._initialized = True
 
         if self._params.audio_out_enabled:
-            self._listener_id: int = await self._client.connect(VonageClientListener())
+            await self._client.connect()
+            self._connected = True
 
         await self.set_transport_ready(frame)
 
-    async def write_audio_frame(self, frame: OutputAudioRawFrame):
+    async def write_audio_frame(self, frame: OutputAudioRawFrame) -> bool:
         """Write an audio frame to the Vonage session.
 
         Args:
             frame: The OutputAudioRawFrame to send.
         """
-        if self._listener_id is not None and self._params.audio_out_enabled:
+        if self._connected and self._params.audio_out_enabled:
             check_audio_data(frame.audio, frame.num_frames, frame.num_channels)
 
             audio = frame.audio
@@ -576,29 +621,31 @@ class VonageVideoWebrtcOutputTransport(BaseOutputTransport):
                 ),
             )
 
-            await self._client.write_audio(processed_audio.tobytes())
+            return await self._client.write_audio(processed_audio.tobytes())
+        else:
+            return False
 
-    async def stop(self, frame: EndFrame):
+    async def stop(self, frame: EndFrame) -> None:
         """Stop the Vonage output transport.
 
         Args:
             frame: The EndFrame to stop the transport.
         """
         await super().stop(frame)
-        if self._listener_id is not None and self._params.audio_out_enabled:
-            listener_id, self._listener_id = self._listener_id, None
-            await self._client.disconnect(listener_id)
+        if self._connected:
+            self._connected = False
+            await self._client.disconnect()
 
-    async def cancel(self, frame: CancelFrame):
+    async def cancel(self, frame: CancelFrame) -> None:
         """Cancel the Vonage output transport.
 
         Args:
             frame: The CancelFrame to cancel the transport.
         """
         await super().cancel(frame)
-        if self._listener_id is not None and self._params.audio_out_enabled:
-            listener_id, self._listener_id = self._listener_id, None
-            await self._client.disconnect(listener_id)
+        if self._connected:
+            self._connected = False
+            await self._client.disconnect()
 
 
 class VonageVideoWebrtcTransport(BaseTransport):
@@ -637,22 +684,18 @@ class VonageVideoWebrtcTransport(BaseTransport):
         self._params = params
 
         vonage_params = VonageClientParams(
-            audio_in_sample_rate=params.audio_in_sample_rate,
+            audio_in_sample_rate=params.audio_in_sample_rate or 48000,
             audio_in_channels=params.audio_in_channels,
             audio_out_sample_rate=params.audio_out_sample_rate,
             audio_out_channels=params.audio_out_channels,
             enable_migration=params.session_enable_migration,
         )
-        publisher_settings = (
-            PublisherSettings(
-                name=params.publisher_name,
-                audio_settings=PublisherAudioSettings(
-                    enable_stereo_mode=params.audio_out_channels == 2,
-                    enable_opus_dtx=params.publisher_enable_opus_dtx,
-                ),
-            )
-            if params.audio_out_enabled
-            else None
+        publisher_settings = VonagePublisherSettings(
+            name=params.publisher_name,
+            enable_stereo_mode=params.audio_out_channels == 2,
+            enable_opus_dtx=params.publisher_enable_opus_dtx,
+            has_audio=params.audio_out_enabled,
+            has_video=False,
         )
         self._client = VonageClient(
             application_id, session_id, token, vonage_params, publisher_settings
@@ -704,7 +747,7 @@ class VonageVideoWebrtcTransport(BaseTransport):
             self._output = VonageVideoWebrtcOutputTransport(self._client, self._params)
         return self._output
 
-    async def _on_connected(self, session: Session):
+    async def _on_connected(self, session: Session) -> None:
         """Handle session connected event.
 
         Args:
@@ -712,7 +755,7 @@ class VonageVideoWebrtcTransport(BaseTransport):
         """
         await self._call_event_handler("on_joined", {"sessionId": session.id})
 
-    async def _on_disconnected(self, _session_id: Session):
+    async def _on_disconnected(self, _session_id: Session) -> None:
         """Handle session disconnected event.
 
         Args:
@@ -720,7 +763,7 @@ class VonageVideoWebrtcTransport(BaseTransport):
         """
         await self._call_event_handler("on_left")
 
-    async def _on_error(self, _session: Session, description: str, _code: int):
+    async def _on_error(self, _session: Session, description: str, _code: int) -> None:
         """Handle session error event.
 
         Args:
@@ -730,7 +773,7 @@ class VonageVideoWebrtcTransport(BaseTransport):
         """
         await self._call_event_handler("on_error", description)
 
-    async def _on_stream_received(self, session: Session, stream: Stream):
+    async def _on_stream_received(self, session: Session, stream: Stream) -> None:
         """Handle stream received event.
 
         Args:
@@ -747,7 +790,7 @@ class VonageVideoWebrtcTransport(BaseTransport):
             "on_participant_joined", {"sessionId": session.id, "streamId": stream.id}
         )
 
-    async def _on_stream_dropped(self, session: Session, stream: Stream):
+    async def _on_stream_dropped(self, session: Session, stream: Stream) -> None:
         """Handle stream dropped event.
 
         Args:
@@ -758,7 +801,7 @@ class VonageVideoWebrtcTransport(BaseTransport):
             "on_participant_left", {"sessionId": session.id, "streamId": stream.id}
         )
 
-    async def _on_subscriber_connected(self, subscriber: Subscriber):
+    async def _on_subscriber_connected(self, subscriber: Subscriber) -> None:
         """Handle subscriber connected event.
 
         Args:
@@ -768,7 +811,7 @@ class VonageVideoWebrtcTransport(BaseTransport):
             "on_client_connected", {"subscriberId": subscriber.stream.id}
         )
 
-    async def _on_subscriber_disconnected(self, subscriber: Subscriber):
+    async def _on_subscriber_disconnected(self, subscriber: Subscriber) -> None:
         """Handle subscriber disconnected event.
 
         Args:
@@ -779,7 +822,9 @@ class VonageVideoWebrtcTransport(BaseTransport):
         )
 
 
-def check_audio_data(buffer: bytes | memoryview, number_of_frames: int, number_of_channels):
+def check_audio_data(
+    buffer: bytes | memoryview, number_of_frames: int, number_of_channels: int
+) -> None:
     """Check the audio sample width based on buffer size, number of frames and channels."""
     if number_of_channels not in (1, 2):
         raise ValueError(f"We only accept mono or stereo audio, got {number_of_channels}")
@@ -807,8 +852,8 @@ class AudioProps:
 
 
 def process_audio_channels(
-    audio: np.ndarray, current: AudioProps, target: AudioProps
-) -> np.ndarray:
+    audio: npt.NDArray[np.int16], current: AudioProps, target: AudioProps
+) -> npt.NDArray[np.int16]:
     """Normalize audio channels to the target properties."""
     if current.is_stereo != target.is_stereo:
         if target.is_stereo:
@@ -820,8 +865,11 @@ def process_audio_channels(
 
 
 async def process_audio(
-    resampler: BaseAudioResampler, audio: np.ndarray, current: AudioProps, target: AudioProps
-) -> np.ndarray:
+    resampler: BaseAudioResampler,
+    audio: npt.NDArray[np.int16],
+    current: AudioProps,
+    target: AudioProps,
+) -> npt.NDArray[np.int16]:
     """Normalize audio to the target properties."""
     res_audio = audio
     if current.sample_rate != target.sample_rate:
@@ -829,10 +877,10 @@ async def process_audio(
         res_audio = process_audio_channels(res_audio, current, replace(current, is_stereo=False))
         current = replace(current, is_stereo=False)
 
-        res_audio = await resampler.resample(
+        res_audio_bytes: bytes = await resampler.resample(
             res_audio.tobytes(), current.sample_rate, target.sample_rate
         )
-        res_audio = np.frombuffer(res_audio, dtype=np.int16)
+        res_audio = np.frombuffer(res_audio_bytes, dtype=np.int16)
 
     res_audio = process_audio_channels(res_audio, current, target)
 
