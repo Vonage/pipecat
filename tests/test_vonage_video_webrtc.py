@@ -13,13 +13,17 @@ from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 import numpy as np
 import pytest
 
+from pipecat.clocks.system_clock import SystemClock
 from pipecat.frames.frames import (
     CancelFrame,
     EndFrame,
     InputAudioRawFrame,
+    InterruptionFrame,
     OutputAudioRawFrame,
     StartFrame,
 )
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessorSetup
+from pipecat.utils.asyncio.task_manager import TaskManager, TaskManagerParams
 
 # Mock the vonage_video module since it's not available in test environment
 vonage_video_mock = MagicMock()
@@ -790,6 +794,28 @@ class TestVonageVideoWebrtcTransport:
             remove_listener_mock.assert_called_once_with(1)
             assert not transport._connected
 
+    async def create_output_transport(
+        self, params: VonageVideoWebrtcTransportParams
+    ) -> VonageVideoWebrtcOutputTransport:
+        publisher_settings = VonagePublisherSettings()
+        client = self.VonageClient(
+            self.application_id,
+            self.session_id,
+            self.token,
+            self.VonageClientParams(),
+            publisher_settings,
+        )
+        transport = VonageVideoWebrtcOutputTransport(client, params)
+
+        clock: SystemClock = SystemClock()  # type: ignore[no-untyped-call]
+        task_manager = TaskManager()
+        task_manager.setup(TaskManagerParams(loop=asyncio.get_event_loop()))
+        transport_params = self.VonageVideoWebrtcTransportParams(audio_out_enabled=True)
+        transport = self.VonageVideoWebrtcOutputTransport(client, transport_params)
+        await transport.setup(FrameProcessorSetup(clock=clock, task_manager=task_manager))
+
+        return transport
+
     @pytest.mark.asyncio
     @patch("pipecat.transports.vonage.video_webrtc.create_stream_resampler")
     async def test_vonage_output_transport_initialization(self, mock_resampler: MagicMock) -> None:
@@ -870,6 +896,69 @@ class TestVonageVideoWebrtcTransport:
             )
             # Verify audio was written to client
             client_write_audio_mock.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("pipecat.transports.vonage.video_webrtc.create_stream_resampler")
+    async def test_vonage_output_transport_process_frame_with_interruption(
+        self, mock_resampler: MagicMock
+    ) -> None:
+        """Test VonageVideoWebrtcOutputTransport process_frame method with InterruptionFrame."""
+        mock_resampler.return_value = Mock()
+        transport = await self.create_output_transport(
+            params=self.VonageVideoWebrtcTransportParams(audio_out_enabled=True)
+        )
+        client = transport._client
+
+        with (
+            patch.object(client, "clear_media_buffers") as clear_buffers_mock,
+            patch.object(client, "connect", AsyncMock()),
+        ):
+            interruption_frame = InterruptionFrame()
+            await transport.start(StartFrame())
+            await transport.process_frame(interruption_frame, FrameDirection.DOWNSTREAM)
+
+            # Verify clear_media_buffers was called
+            clear_buffers_mock.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("pipecat.transports.vonage.video_webrtc.create_stream_resampler")
+    async def test_vonage_output_transport_process_frame_without_interruption(
+        self, mock_resampler: MagicMock
+    ) -> None:
+        """Test VonageVideoWebrtcOutputTransport process_frame method with non-interruption frame."""
+        mock_resampler.return_value = Mock()
+        transport = await self.create_output_transport(
+            params=self.VonageVideoWebrtcTransportParams(audio_out_enabled=True)
+        )
+        client = transport._client
+
+        with patch.object(client, "clear_media_buffers") as clear_buffers_mock:
+            audio_frame = OutputAudioRawFrame(
+                audio=b"\x00\x01\x02\x03", sample_rate=16000, num_channels=1
+            )
+            await transport.process_frame(audio_frame, FrameDirection.DOWNSTREAM)
+
+            # Verify clear_media_buffers was NOT called for non-interruption frames
+            clear_buffers_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("pipecat.transports.vonage.video_webrtc.create_stream_resampler")
+    async def test_vonage_output_transport_process_frame_when_not_connected(
+        self, mock_resampler: MagicMock
+    ) -> None:
+        """Test VonageVideoWebrtcOutputTransport process_frame method when not connected."""
+        mock_resampler.return_value = Mock()
+        transport = await self.create_output_transport(
+            params=self.VonageVideoWebrtcTransportParams(audio_out_enabled=True)
+        )
+        client = transport._client
+
+        with patch.object(client, "clear_media_buffers") as clear_buffers_mock:
+            interruption_frame = InterruptionFrame()
+            await transport.process_frame(interruption_frame, FrameDirection.DOWNSTREAM)
+
+            # Verify clear_media_buffers was NOT called when not connected
+            clear_buffers_mock.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_vonage_transport_initialization(self) -> None:

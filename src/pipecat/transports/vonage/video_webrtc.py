@@ -15,12 +15,13 @@ from pipecat.audio.utils import create_stream_resampler
 from pipecat.frames.frames import (
     CancelFrame,
     EndFrame,
+    Frame,
     InputAudioRawFrame,
+    InterruptionFrame,
     OutputAudioRawFrame,
     StartFrame,
-    UserAudioRawFrame,
 )
-from pipecat.processors.frame_processor import FrameProcessor, FrameProcessorSetup
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.transports.base_input import BaseInputTransport
 from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import BaseTransport, TransportParams
@@ -299,6 +300,11 @@ class VonageClient:
 
         for listener in self._listeners.values():
             await listener.on_disconnected(self._session)
+
+    def clear_media_buffers(self) -> None:
+        """Clear output media buffers in the Vonage session."""
+        logger.debug(f"Clearing media buffers {self._session_id}")
+        self._client.clear_media_buffers()
 
     async def write_audio(self, raw_audio_frame: bytes) -> bool:
         """Write audio data to the Vonage session.
@@ -593,6 +599,20 @@ class VonageVideoWebrtcOutputTransport(BaseOutputTransport):
             self._connected = True
 
         await self.set_transport_ready(frame)
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        """Process a frame for the Vonage output transport.
+
+        Args:
+            frame: The frame to process.
+            direction: The direction of frame flow in the pipeline.
+        """
+        await super().process_frame(frame, direction)
+
+        # if we get an interruption frame, we need to ensure the buffers inside Vonage Video Connector are cleared
+        if self._connected and isinstance(frame, InterruptionFrame):
+            logger.info("Clearing Vonage media buffers due to interruption frame")
+            self._client.clear_media_buffers()
 
     async def write_audio_frame(self, frame: OutputAudioRawFrame) -> bool:
         """Write an audio frame to the Vonage session.
