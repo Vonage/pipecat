@@ -19,6 +19,7 @@ from pipecat.frames.frames import (
     InputAudioRawFrame,
     InterruptionFrame,
     OutputAudioRawFrame,
+    OutputImageRawFrame,
     StartFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
@@ -38,8 +39,11 @@ try:
         SessionAudioSettings,
         SessionAVSettings,
         SessionSettings,
+        SessionVideoInputSettings,
         Stream,
         Subscriber,
+        VideoFrame,
+        VideoResolution,
     )
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
@@ -134,6 +138,10 @@ class VonageClientParams:
     audio_out_sample_rate: int = 48000
     audio_out_channels: int = 2
     enable_migration: bool = False
+    video_out_width: int = 640
+    video_out_height: int = 480
+    video_out_framerate: int = 30
+    video_out_color_format: str = "RGB"
 
 
 class VonageClient:
@@ -250,6 +258,13 @@ class VonageClient:
                         sample_rate=self._params.audio_in_sample_rate,
                         number_of_channels=self._params.audio_in_channels,
                     ),
+                    video_input=SessionVideoInputSettings(
+                        resolution=VideoResolution(
+                            width=self._params.video_out_width, height=self._params.video_out_height
+                        ),
+                        fps=self._params.video_out_framerate,
+                        format=self.vonage_image_format(self._params.video_out_color_format),
+                    ),
                 ),
                 enable_migration=self._params.enable_migration,
                 logging=LoggingSettings(level="INFO"),
@@ -319,6 +334,37 @@ class VonageClient:
                 number_of_frames=frame_count,
                 number_of_channels=self._params.audio_out_channels,
                 sample_rate=self._params.audio_out_sample_rate,
+            )
+        )
+
+    @staticmethod
+    def vonage_image_format(pipecat_format: str) -> str:
+        """Normalize Pipecat image format to Vonage format."""
+        format_map = {
+            "YUV": "YUV420P",
+            "RGB": "RGB24",
+            "ARGB": "ARGB32",
+        }
+        return format_map.get(pipecat_format, pipecat_format)
+
+    async def write_video(self, frame: OutputImageRawFrame) -> bool:
+        """Write a video frame to the transport.
+
+        Args:
+            frame: The output video frame to write.
+        """
+        # convert RGB to BGR
+        np_rgb = np.frombuffer(frame.image, dtype=np.uint8)
+        np_bgr = np_rgb.reshape(frame.size[1], frame.size[0], 3)[:, :, ::-1]
+        bgr_bytes = np_bgr.tobytes()
+
+        return self._client.add_video(
+            VideoFrame(
+                frame_buffer=memoryview(bgr_bytes).cast("B"),
+                resolution=VideoResolution(width=frame.size[0], height=frame.size[1]),
+                format=self.vonage_image_format(
+                    frame.format or self._params.video_out_color_format
+                ),
             )
         )
 
@@ -594,7 +640,7 @@ class VonageVideoWebrtcOutputTransport(BaseOutputTransport):
 
         self._initialized = True
 
-        if self._params.audio_out_enabled:
+        if self._params.audio_out_enabled or self._params.video_out_enabled:
             await self._client.connect()
             self._connected = True
 
@@ -620,6 +666,7 @@ class VonageVideoWebrtcOutputTransport(BaseOutputTransport):
         Args:
             frame: The OutputAudioRawFrame to send.
         """
+        result = False
         if self._connected and self._params.audio_out_enabled:
             check_audio_data(frame.audio, frame.num_frames, frame.num_channels)
 
@@ -641,9 +688,44 @@ class VonageVideoWebrtcOutputTransport(BaseOutputTransport):
                 ),
             )
 
-            return await self._client.write_audio(processed_audio.tobytes())
-        else:
-            return False
+            result = await self._client.write_audio(processed_audio.tobytes())
+
+        return result
+
+    async def write_video_frame(self, frame: OutputImageRawFrame) -> bool:
+        """Write a video frame to the transport.
+
+        Args:
+            frame: The output video frame to write.
+        """
+        result = False
+        if self._connected and self._params.video_out_enabled and self.check_image_data(frame):
+            result = await self._client.write_video(frame)
+
+        return result
+
+    def check_image_data(self, frame: OutputImageRawFrame) -> bool:
+        """Check the image data for validity.
+
+        Args:
+            frame: The OutputImageRawFrame to check.
+        """
+        res = True
+        if frame.format != self._params.video_out_color_format:
+            logger.error(
+                f"Expected color format {self._params.video_out_color_format}, got {frame.format}"
+            )
+            res = False
+        if (
+            frame.size[0] != self._params.video_out_width
+            or frame.size[1] != self._params.video_out_height
+        ):
+            logger.error(
+                f"Expected resolution {self._params.video_out_width}x{self._params.video_out_height}, "
+                f"got {frame.size[0]}x{frame.size[1]}"
+            )
+            res = False
+        return res
 
     async def stop(self, frame: EndFrame) -> None:
         """Stop the Vonage output transport.
@@ -709,13 +791,17 @@ class VonageVideoWebrtcTransport(BaseTransport):
             audio_out_sample_rate=params.audio_out_sample_rate,
             audio_out_channels=params.audio_out_channels,
             enable_migration=params.session_enable_migration,
+            video_out_width=params.video_out_width,
+            video_out_height=params.video_out_height,
+            video_out_framerate=params.video_out_framerate,
+            video_out_color_format=params.video_out_color_format,
         )
         publisher_settings = VonagePublisherSettings(
             name=params.publisher_name,
             enable_stereo_mode=params.audio_out_channels == 2,
             enable_opus_dtx=params.publisher_enable_opus_dtx,
             has_audio=params.audio_out_enabled,
-            has_video=False,
+            has_video=params.video_out_enabled,
         )
         self._client = VonageClient(
             application_id, session_id, token, vonage_params, publisher_settings

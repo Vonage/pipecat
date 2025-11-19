@@ -20,6 +20,7 @@ from pipecat.frames.frames import (
     InputAudioRawFrame,
     InterruptionFrame,
     OutputAudioRawFrame,
+    OutputImageRawFrame,
     StartFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessorSetup
@@ -73,9 +74,23 @@ class MockSessionAudioSettings:
 
 
 @dataclass(eq=True, frozen=True)
+class MockVideoResolution:
+    width: int = 1280
+    height: int = 720
+
+
+@dataclass(eq=True, frozen=True)
+class MockSessionVideoPublisherSettings:
+    resolution: MockVideoResolution = MockVideoResolution()
+    fps: int = 30
+    format: str = "YUV"
+
+
+@dataclass(eq=True, frozen=True)
 class MockSessionAVSettings:
     audio_input: MockSessionAudioSettings = MockSessionAudioSettings()
     audio_output: MockSessionAudioSettings = MockSessionAudioSettings()
+    video_input: MockSessionVideoPublisherSettings = MockSessionVideoPublisherSettings()
 
 
 @dataclass(eq=True, frozen=True)
@@ -104,6 +119,13 @@ class MockPublisherSettings:
     audio_settings: MockPublisherAudioSettings = MockPublisherAudioSettings()
 
 
+@dataclass(eq=True, frozen=True)
+class MockVideoFrame:
+    resolution: MockVideoResolution = MockVideoResolution()
+    format: str = "RGB24"
+    frame_buffer: bytes = b""
+
+
 # Set up the mock module structure
 vonage_video_mock.models.AudioData = MockAudioData
 vonage_video_mock.models.Session = MockSession
@@ -116,6 +138,9 @@ vonage_video_mock.models.SessionSettings = MockSessionSettings
 vonage_video_mock.models.SessionAudioSettings = MockSessionAudioSettings
 vonage_video_mock.models.PublisherAudioSettings = MockPublisherAudioSettings
 vonage_video_mock.models.PublisherSettings = MockPublisherSettings
+vonage_video_mock.models.SessionVideoInputSettings = MockSessionVideoPublisherSettings
+vonage_video_mock.models.VideoResolution = MockVideoResolution
+vonage_video_mock.models.VideoFrame = MockVideoFrame
 
 # Mock the module in sys.modules so imports work
 sys.modules["vonage_video_connector"] = vonage_video_mock
@@ -295,6 +320,10 @@ class TestVonageVideoWebrtcTransport:
         params.audio_in_sample_rate = 44100 if has_video else 22050
         params.audio_out_sample_rate = 22050 if has_video else 44100
         params.enable_migration = has_video
+        params.video_out_color_format = "YUV" if has_audio else "RGB"
+        params.video_out_framerate = 30 if has_audio else 15
+        params.video_out_width = 1280 if has_audio else 640
+        params.video_out_height = 720 if has_audio else 480
 
         publisher_settings = self.VonagePublisherSettings(has_audio=has_audio, has_video=has_video)
         client = self.VonageClient(
@@ -330,6 +359,14 @@ class TestVonageVideoWebrtcTransport:
                     sample_rate=params.audio_in_sample_rate,
                     number_of_channels=params.audio_in_channels,
                 ),
+                video_input=MockSessionVideoPublisherSettings(
+                    resolution=MockVideoResolution(
+                        width=params.video_out_width,
+                        height=params.video_out_height,
+                    ),
+                    fps=params.video_out_framerate,
+                    format=self.VonageClient.vonage_image_format(params.video_out_color_format),
+                ),
             ),
             enable_migration=params.enable_migration,
             logging=MockLoggingSettings(level="INFO"),
@@ -362,12 +399,6 @@ class TestVonageVideoWebrtcTransport:
 
         # make changes to params depending on the configuration to check the right value
         # goes to the right destination
-        params.audio_in_channels = 1 if has_video else 2
-        params.audio_out_channels = 2 if has_video else 1
-        params.audio_in_sample_rate = 44100 if has_video else 22050
-        params.audio_out_sample_rate = 22050 if has_video else 44100
-        params.enable_migration = has_video
-
         publisher_settings = self.VonagePublisherSettings(
             has_audio=has_audio,
             has_video=has_video,
@@ -583,6 +614,61 @@ class TestVonageVideoWebrtcTransport:
         assert call_args.number_of_frames == 2  # 8 bytes / (2 channels * 2 bytes)
         assert call_args.number_of_channels == 2
         assert call_args.sample_rate == 48000
+
+    @pytest.mark.asyncio
+    async def test_vonage_client_write_video(self) -> None:
+        """Test VonageClient write_video method."""
+        params = self.VonageClientParams(
+            video_out_width=640,
+            video_out_height=480,
+            video_out_color_format="RGB",
+        )
+        publisher_settings = self.VonagePublisherSettings()
+        client = self.VonageClient(
+            self.application_id, self.session_id, self.token, params, publisher_settings
+        )
+
+        # Create a test RGB image (640x480, 3 channels)
+        width, height = 640, 480
+        # Create RGB data: simple gradient pattern
+        rgb_image = np.zeros((height, width, 3), dtype=np.uint8)
+        rgb_image[:, :, 0] = 100  # R channel
+        rgb_image[:, :, 1] = 150  # G channel
+        rgb_image[:, :, 2] = 200  # B channel
+
+        rgb_bytes = rgb_image.tobytes()
+
+        # Create OutputImageRawFrame
+        frame = OutputImageRawFrame(image=rgb_bytes, size=(width, height), format="RGB")
+
+        # Mock the add_video method
+        self.mock_client_instance.add_video = MagicMock(return_value=True)
+
+        result = await client.write_video(frame)
+
+        # Verify add_video was called
+        assert result is True
+        self.mock_client_instance.add_video.assert_called_once()
+
+        # Get the VideoFrame argument
+        call_args = self.mock_client_instance.add_video.call_args[0][0]
+
+        # Verify the resolution
+        assert call_args.resolution.width == width
+        assert call_args.resolution.height == height
+
+        # Verify the format
+        assert call_args.format == "RGB24"
+
+        # Verify BGR conversion happened correctly
+        # Convert back from the buffer to verify
+        bgr_buffer = bytes(call_args.frame_buffer)
+        bgr_image = np.frombuffer(bgr_buffer, dtype=np.uint8).reshape(height, width, 3)
+
+        # Check that RGB was converted to BGR (channels swapped)
+        assert bgr_image[0, 0, 0] == 200  # B channel (was R=200 in RGB)
+        assert bgr_image[0, 0, 1] == 150  # G channel (unchanged)
+        assert bgr_image[0, 0, 2] == 100  # R channel (was B=100 in RGB)
 
     @pytest.mark.asyncio
     async def test_vonage_client_events(self) -> None:
@@ -805,13 +891,11 @@ class TestVonageVideoWebrtcTransport:
             self.VonageClientParams(),
             publisher_settings,
         )
-        transport = VonageVideoWebrtcOutputTransport(client, params)
 
         clock: SystemClock = SystemClock()  # type: ignore[no-untyped-call]
         task_manager = TaskManager()
         task_manager.setup(TaskManagerParams(loop=asyncio.get_event_loop()))
-        transport_params = self.VonageVideoWebrtcTransportParams(audio_out_enabled=True)
-        transport = self.VonageVideoWebrtcOutputTransport(client, transport_params)
+        transport = self.VonageVideoWebrtcOutputTransport(client, params)
         await transport.setup(FrameProcessorSetup(clock=clock, task_manager=task_manager))
 
         return transport
@@ -898,12 +982,119 @@ class TestVonageVideoWebrtcTransport:
             client_write_audio_mock.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("pipecat.transports.vonage.video_webrtc.create_stream_resampler")
-    async def test_vonage_output_transport_process_frame_with_interruption(
-        self, mock_resampler: MagicMock
-    ) -> None:
+    async def test_vonage_output_transport_write_video_frame_not_connected(self) -> None:
+        """Test VonageVideoWebrtcOutputTransport write_video_frame method."""
+        transport = await self.create_output_transport(
+            params=self.VonageVideoWebrtcTransportParams(video_out_enabled=True)
+        )
+        client = transport._client
+
+        # Create a test video frame
+        width, height = 640, 480
+        rgb_image = np.zeros((height, width, 3), dtype=np.uint8)
+        rgb_image[:, :, 0] = 100
+        rgb_image[:, :, 1] = 150
+        rgb_image[:, :, 2] = 200
+
+        video_frame = OutputImageRawFrame(
+            image=rgb_image.tobytes(), size=(width, height), format="RGB"
+        )
+
+        with patch.object(client, "write_video", AsyncMock(return_value=True)) as write_video_mock:
+            await transport.stop(EndFrame())
+            result = await transport.write_video_frame(video_frame)
+
+            # Should return False when not connected
+            assert result is False
+            write_video_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_vonage_output_transport_write_video_frame_connected(self) -> None:
+        """Test VonageVideoWebrtcOutputTransport write_video_frame method when connected."""
+        transport = await self.create_output_transport(
+            params=self.VonageVideoWebrtcTransportParams(
+                video_out_enabled=True,
+                video_out_width=640,
+                video_out_height=480,
+                video_out_color_format="RGB",
+            )
+        )
+        client = transport._client
+
+        # Create a test video frame
+        width, height = 640, 480
+        rgb_image = np.zeros((height, width, 3), dtype=np.uint8)
+        rgb_image[:, :, 0] = 100
+        rgb_image[:, :, 1] = 150
+        rgb_image[:, :, 2] = 200
+
+        video_frame = OutputImageRawFrame(
+            image=rgb_image.tobytes(), size=(width, height), format="RGB"
+        )
+
+        with patch.object(client, "write_video", AsyncMock(return_value=True)) as write_video_mock:
+            transport._connected = True
+            result = await transport.write_video_frame(video_frame)
+
+            # Should return True and call write_video when connected
+            assert result is True
+            write_video_mock.assert_called_once_with(video_frame)
+
+    @pytest.mark.asyncio
+    async def test_vonage_output_transport_write_video_frame_invalid_size(self) -> None:
+        """Test VonageVideoWebrtcOutputTransport write_video_frame with invalid frame size."""
+        transport = await self.create_output_transport(
+            params=self.VonageVideoWebrtcTransportParams(
+                video_out_enabled=True,
+                video_out_width=640,
+                video_out_height=480,
+                video_out_color_format="RGB",
+            )
+        )
+
+        # Create a video frame with incorrect size
+        width, height = 320, 240  # Different from expected 640x480
+        rgb_image = np.zeros((height, width, 3), dtype=np.uint8)
+
+        video_frame = OutputImageRawFrame(
+            image=rgb_image.tobytes(), size=(width, height), format="RGB"
+        )
+
+        transport._connected = True
+        result = await transport.write_video_frame(video_frame)
+
+        # Should return False for invalid size
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_vonage_output_transport_write_video_frame_invalid_format(self) -> None:
+        """Test VonageVideoWebrtcOutputTransport write_video_frame with invalid color format."""
+        transport = await self.create_output_transport(
+            params=self.VonageVideoWebrtcTransportParams(
+                video_out_enabled=True,
+                video_out_width=640,
+                video_out_height=480,
+                video_out_color_format="YUV",
+            )
+        )
+
+        # Create a video frame with incorrect size
+        width, height = 320, 240  # Different from expected 640x480
+        rgb_image = np.zeros((height, width, 3), dtype=np.uint8)
+
+        video_frame = OutputImageRawFrame(
+            image=rgb_image.tobytes(), size=(width, height), format="RGB"
+        )
+
+        transport._connected = True
+        result = await transport.write_video_frame(video_frame)
+
+        # Should return False for invalid size
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_vonage_output_transport_process_frame_with_interruption(self) -> None:
         """Test VonageVideoWebrtcOutputTransport process_frame method with InterruptionFrame."""
-        mock_resampler.return_value = Mock()
         transport = await self.create_output_transport(
             params=self.VonageVideoWebrtcTransportParams(audio_out_enabled=True)
         )
@@ -913,20 +1104,16 @@ class TestVonageVideoWebrtcTransport:
             patch.object(client, "clear_media_buffers") as clear_buffers_mock,
             patch.object(client, "connect", AsyncMock()),
         ):
-            interruption_frame = InterruptionFrame()
             await transport.start(StartFrame())
+            interruption_frame = InterruptionFrame()
             await transport.process_frame(interruption_frame, FrameDirection.DOWNSTREAM)
 
             # Verify clear_media_buffers was called
             clear_buffers_mock.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("pipecat.transports.vonage.video_webrtc.create_stream_resampler")
-    async def test_vonage_output_transport_process_frame_without_interruption(
-        self, mock_resampler: MagicMock
-    ) -> None:
+    async def test_vonage_output_transport_process_frame_without_interruption(self) -> None:
         """Test VonageVideoWebrtcOutputTransport process_frame method with non-interruption frame."""
-        mock_resampler.return_value = Mock()
         transport = await self.create_output_transport(
             params=self.VonageVideoWebrtcTransportParams(audio_out_enabled=True)
         )
@@ -942,15 +1129,12 @@ class TestVonageVideoWebrtcTransport:
             clear_buffers_mock.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch("pipecat.transports.vonage.video_webrtc.create_stream_resampler")
-    async def test_vonage_output_transport_process_frame_when_not_connected(
-        self, mock_resampler: MagicMock
-    ) -> None:
+    async def test_vonage_output_transport_process_frame_when_not_connected(self) -> None:
         """Test VonageVideoWebrtcOutputTransport process_frame method when not connected."""
-        mock_resampler.return_value = Mock()
         transport = await self.create_output_transport(
             params=self.VonageVideoWebrtcTransportParams(audio_out_enabled=True)
         )
+        await transport.stop(EndFrame())  # Ensure transport is not connected
         client = transport._client
 
         with patch.object(client, "clear_media_buffers") as clear_buffers_mock:
