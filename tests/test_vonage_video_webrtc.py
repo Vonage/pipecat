@@ -88,9 +88,9 @@ class MockSessionVideoPublisherSettings:
 
 @dataclass(eq=True, frozen=True)
 class MockSessionAVSettings:
-    audio_input: MockSessionAudioSettings = MockSessionAudioSettings()
-    audio_output: MockSessionAudioSettings = MockSessionAudioSettings()
-    video_input: MockSessionVideoPublisherSettings = MockSessionVideoPublisherSettings()
+    audio_publisher: MockSessionAudioSettings = MockSessionAudioSettings()
+    audio_subscribers_mix: MockSessionAudioSettings = MockSessionAudioSettings()
+    video_publisher: MockSessionVideoPublisherSettings = MockSessionVideoPublisherSettings()
 
 
 @dataclass(eq=True, frozen=True)
@@ -138,7 +138,7 @@ vonage_video_mock.models.SessionSettings = MockSessionSettings
 vonage_video_mock.models.SessionAudioSettings = MockSessionAudioSettings
 vonage_video_mock.models.PublisherAudioSettings = MockPublisherAudioSettings
 vonage_video_mock.models.PublisherSettings = MockPublisherSettings
-vonage_video_mock.models.SessionVideoInputSettings = MockSessionVideoPublisherSettings
+vonage_video_mock.models.SessionVideoPublisherSettings = MockSessionVideoPublisherSettings
 vonage_video_mock.models.VideoResolution = MockVideoResolution
 vonage_video_mock.models.VideoFrame = MockVideoFrame
 
@@ -489,15 +489,15 @@ class TestVonageVideoWebrtcTransport:
         assert call_args[1]["token"] == self.token
         assert call_args[1]["session_settings"] == MockSessionSettings(
             av=MockSessionAVSettings(
-                audio_input=MockSessionAudioSettings(
+                audio_publisher=MockSessionAudioSettings(
                     sample_rate=params.audio_out_sample_rate,
                     number_of_channels=params.audio_out_channels,
                 ),
-                audio_output=MockSessionAudioSettings(
+                audio_subscribers_mix=MockSessionAudioSettings(
                     sample_rate=params.audio_in_sample_rate,
                     number_of_channels=params.audio_in_channels,
                 ),
-                video_input=MockSessionVideoPublisherSettings(
+                video_publisher=MockSessionVideoPublisherSettings(
                     resolution=MockVideoResolution(
                         width=params.video_out_width,
                         height=params.video_out_height,

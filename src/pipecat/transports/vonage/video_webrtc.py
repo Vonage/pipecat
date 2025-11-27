@@ -44,7 +44,7 @@ try:
         SessionAudioSettings,
         SessionAVSettings,
         SessionSettings,
-        SessionVideoInputSettings,
+        SessionVideoPublisherSettings,
         Stream,
         Subscriber,
         VideoFrame,
@@ -464,15 +464,15 @@ class VonageClient:
                 token=self._token,
                 session_settings=SessionSettings(
                     av=SessionAVSettings(
-                        audio_input=SessionAudioSettings(
+                        audio_publisher=SessionAudioSettings(
                             sample_rate=self._audio_out_sample_rate,
                             number_of_channels=self._params.audio_out_channels,
                         ),
-                        audio_output=SessionAudioSettings(
+                        audio_subscribers_mix=SessionAudioSettings(
                             sample_rate=self._audio_in_sample_rate,
                             number_of_channels=self._params.audio_in_channels,
                         ),
-                        video_input=SessionVideoInputSettings(
+                        video_publisher=SessionVideoPublisherSettings(
                             resolution=VideoResolution(
                                 width=self._params.video_out_width,
                                 height=self._params.video_out_height,
