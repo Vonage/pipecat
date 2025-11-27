@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 
 import asyncio
+import inspect
 import sys
-import unittest
-from concurrent.futures import Future
-from dataclasses import dataclass, field
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import timedelta
-from http import client
-from typing import Any, Awaitable, Callable, Optional
-from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
+from typing import Any, Callable, Optional
+from unittest.mock import ANY, AsyncMock, MagicMock, Mock, call, patch
 
 import numpy as np
 import pytest
@@ -152,8 +152,6 @@ from pipecat.transports.vonage.video_webrtc import (
     AudioProps,
     VonageClient,
     VonageClientListener,
-    VonageClientParams,
-    VonagePublisherSettings,
     VonageVideoWebrtcInputTransport,
     VonageVideoWebrtcOutputTransport,
     VonageVideoWebrtcTransport,
@@ -171,8 +169,6 @@ class TestVonageVideoWebrtcTransport:
         """Set up test fixtures."""
         self.VonageClient = VonageClient
         self.VonageClientListener = VonageClientListener
-        self.VonageClientParams = VonageClientParams
-        self.VonagePublisherSettings = VonagePublisherSettings
         self.VonageVideoWebrtcInputTransport = VonageVideoWebrtcInputTransport
         self.VonageVideoWebrtcOutputTransport = VonageVideoWebrtcOutputTransport
         self.VonageVideoWebrtcTransport = VonageVideoWebrtcTransport
@@ -186,6 +182,18 @@ class TestVonageVideoWebrtcTransport:
         self.application_id = "test-app-id"
         self.session_id = "test-session-id"
         self.token = "test-token"
+        self._frame_processor_setup: Optional[FrameProcessorSetup] = None
+        self._executor = ThreadPoolExecutor(max_workers=1)
+
+    def _get_frame_processor_setup(self) -> FrameProcessorSetup:
+        if self._frame_processor_setup is not None:
+            return self._frame_processor_setup
+
+        clock: SystemClock = SystemClock()  # type: ignore[no-untyped-call]
+        task_manager = TaskManager()
+        task_manager.setup(TaskManagerParams(loop=asyncio.get_running_loop()))
+        self._frame_processor_setup = FrameProcessorSetup(clock=clock, task_manager=task_manager)
+        return self._frame_processor_setup
 
     async def _wait_for_condition(
         self,
@@ -212,28 +220,6 @@ class TestVonageVideoWebrtcTransport:
                 raise asyncio.TimeoutError(f"Condition not met within {timeout}")
             await asyncio.sleep(check_interval_seconds)
 
-    def test_vonage_client_params_defaults(self) -> None:
-        """Test VonageClientParams default values."""
-        params = self.VonageClientParams()
-        assert params.audio_in_sample_rate == 48000
-        assert params.audio_in_channels == 2
-        assert params.enable_migration is False
-
-    def test_vonage_client_params_custom_values(self) -> None:
-        """Test VonageClientParams with custom values."""
-        params = self.VonageClientParams(
-            audio_in_sample_rate=16000,
-            audio_in_channels=1,
-            audio_out_sample_rate=22050,
-            audio_out_channels=1,
-            enable_migration=True,
-        )
-        assert params.audio_in_sample_rate == 16000
-        assert params.audio_in_channels == 1
-        assert params.audio_out_sample_rate == 22050
-        assert params.audio_out_channels == 1
-        assert params.enable_migration is True
-
     def test_vonage_client_listener_defaults(self) -> None:
         """Test VonageClientListener default values."""
         listener = self.VonageClientListener()
@@ -258,11 +244,8 @@ class TestVonageVideoWebrtcTransport:
         # Reset the mock for this specific test
         vonage_video_mock.VonageVideoClient.reset_mock()
 
-        params = self.VonageClientParams()
-        publisher_settings = self.VonagePublisherSettings()
-        client = self.VonageClient(
-            self.application_id, self.session_id, self.token, params, publisher_settings
-        )
+        params = self.VonageVideoWebrtcTransportParams()
+        client = self.VonageClient(self.application_id, self.session_id, self.token, params)
 
         assert client._application_id == self.application_id
         assert client._session_id == self.session_id
@@ -272,13 +255,27 @@ class TestVonageVideoWebrtcTransport:
         assert client._connection_counter == 0
         vonage_video_mock.VonageVideoClient.assert_called_once()
 
+        # check getting the event loop before setup raises error
+        with pytest.raises(Exception) as exc_info:
+            _ = client._get_event_loop()
+
+        assert "missing task manager" in str(exc_info.value)
+
+        # check pushing events before setup raises error
+        async def mock_coro() -> None:
+            pass
+
+        mock_task = mock_coro()
+        with pytest.raises(Exception) as exc_info:
+            client._sdk_event_cb_to_loop(mock_task)
+
+        mock_task.close()
+        assert "missing event queue" in str(exc_info.value)
+
     def test_vonage_client_add_remove_listener(self) -> None:
         """Test adding and removing listeners from VonageClient."""
-        params = self.VonageClientParams()
-        publisher_settings = self.VonagePublisherSettings()
-        client = self.VonageClient(
-            self.application_id, self.session_id, self.token, params, publisher_settings
-        )
+        params = self.VonageVideoWebrtcTransportParams()
+        client = self.VonageClient(self.application_id, self.session_id, self.token, params)
 
         listener = self.VonageClientListener()
         listener_id = client.add_listener(listener)
@@ -293,11 +290,151 @@ class TestVonageVideoWebrtcTransport:
     def _setup_audio_ready_callback(self, client: VonageClient) -> None:
         """Helper to set up the audio ready callback."""
 
-        def connect_side_effect(*_: Any, **__: Any) -> bool:
-            client._on_session_ready_for_audio_cb(vonage_video_mock.models.Session())
+        def connect_side_effect(
+            *_: Any, on_ready_for_audio_cb: Optional[Callable[[Any], None]] = None, **__: Any
+        ) -> bool:
+            assert on_ready_for_audio_cb is not None
+            on_ready_for_audio_cb(vonage_video_mock.models.Session())
             return True
 
         self.mock_client_instance.connect = MagicMock(side_effect=connect_side_effect)
+
+    async def _create_client(
+        self,
+        params: Optional[VonageVideoWebrtcTransportParams] = None,
+        setup_connect_mock: bool = True,
+    ) -> VonageClient:
+        params = params or VonageVideoWebrtcTransportParams()
+        client = self.VonageClient(self.application_id, self.session_id, self.token, params)
+        if setup_connect_mock:
+            if params.audio_in_enabled:
+                self._setup_audio_ready_callback(client)
+            else:
+                self.mock_client_instance.connect.return_value = True
+
+        await client.setup(self._get_frame_processor_setup())
+
+        return client
+
+    async def _run_in_thread(self, callback: Callable[[], Any]) -> Any:
+        """Helper to run a coroutine in a separate thread."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(self._executor, callback)
+
+    async def _wait_client_async_tasks(self, client: VonageClient) -> None:
+        """Helper to wait for all async tasks in the client to complete."""
+        # Wait for any pending tasks in the client's task manager
+        drain_event = asyncio.Event()
+
+        async def set_event_when_drained() -> None:
+            # Wait for all queues to be joined (all tasks processed)
+            if client._event_queue:
+                await client._event_queue.join()
+            if client._audio_queue:
+                await client._audio_queue.join()
+            if client._video_queue:
+                await client._video_queue.join()
+            drain_event.set()
+
+        # Schedule the drain coroutine in the event loop
+        asyncio.create_task(set_event_when_drained())
+        await drain_event.wait()
+
+    async def _create_output_transport(
+        self, params: VonageVideoWebrtcTransportParams
+    ) -> VonageVideoWebrtcOutputTransport:
+        client = self.VonageClient(
+            self.application_id,
+            self.session_id,
+            self.token,
+            params,
+        )
+        transport = self.VonageVideoWebrtcOutputTransport(client, params)
+        await transport.setup(self._get_frame_processor_setup())
+
+        return transport
+
+    async def _create_input_transport(
+        self, params: VonageVideoWebrtcTransportParams
+    ) -> VonageVideoWebrtcInputTransport:
+        client = self.VonageClient(
+            self.application_id,
+            self.session_id,
+            self.token,
+            params,
+        )
+        transport = self.VonageVideoWebrtcInputTransport(client, params)
+        await transport.setup(self._get_frame_processor_setup())
+
+        return transport
+
+    async def _create_transport(
+        self, params: VonageVideoWebrtcTransportParams
+    ) -> VonageVideoWebrtcTransport:
+        transport = VonageVideoWebrtcTransport(
+            self.application_id,
+            self.session_id,
+            self.token,
+            params,
+        )
+        await transport.input().setup(self._get_frame_processor_setup())
+        await transport.output().setup(self._get_frame_processor_setup())
+
+        return transport
+
+    @pytest.mark.asyncio
+    async def test_vonage_client_setup_n_cleanup(self) -> None:
+        """Test VonageClient setup and cleanup methods."""
+        params = self.VonageVideoWebrtcTransportParams()
+        client = self.VonageClient(self.application_id, self.session_id, self.token, params)
+
+        # Before setup, task manager and queues should be None
+        assert client._task_manager is None
+        assert client._event_queue is None
+        assert client._event_task is None
+        assert client._audio_queue is None
+        assert client._audio_task is None
+        assert client._video_queue is None
+        assert client._video_task is None
+
+        # Setup the client
+        setup = self._get_frame_processor_setup()
+        await client.setup(setup)
+
+        # Mock connection
+        self.mock_client_instance.connect.return_value = True
+        client._connected = True
+        client._connection_counter = 1
+
+        # After setup, task manager and queues should be initialized
+        assert client._task_manager is not None
+        assert client._task_manager == setup.task_manager
+        assert client._event_queue is not None
+        assert client._event_task is not None
+        assert client._audio_queue is not None
+        assert client._audio_task is not None
+        assert client._video_queue is not None
+        assert client._video_task is not None
+
+        # Test that calling setup again doesn't recreate the task manager
+        old_task_manager = client._task_manager
+        old_event_queue = client._event_queue
+        old_event_task = client._event_task
+        await client.setup(setup)
+        assert client._task_manager == old_task_manager
+        assert client._event_queue == old_event_queue
+        assert client._event_task == old_event_task
+
+        # Test cleanup without being connected
+        await client.cleanup()
+
+        # After cleanup, tasks should be cancelled
+        assert client._event_task is None
+        assert client._audio_task is None
+        assert client._video_task is None
+
+        # Verify disconnect was called
+        self.mock_client_instance.disconnect.assert_called()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -311,7 +448,7 @@ class TestVonageVideoWebrtcTransport:
     )
     async def test_vonage_client_connect_first_time(self, has_audio: bool, has_video: bool) -> None:
         """Test VonageClient connect method for first connection."""
-        params = self.VonageClientParams()
+        params = self.VonageVideoWebrtcTransportParams()
 
         # make changes to params depending on the configuration to check the right value
         # goes to the right destination
@@ -319,16 +456,17 @@ class TestVonageVideoWebrtcTransport:
         params.audio_out_channels = 2 if has_video else 1
         params.audio_in_sample_rate = 44100 if has_video else 22050
         params.audio_out_sample_rate = 22050 if has_video else 44100
-        params.enable_migration = has_video
+        params.session_enable_migration = has_video
         params.video_out_color_format = "YUV" if has_audio else "RGB"
         params.video_out_framerate = 30 if has_audio else 15
         params.video_out_width = 1280 if has_audio else 640
         params.video_out_height = 720 if has_audio else 480
+        params.audio_in_enabled = has_audio
+        params.audio_out_enabled = has_audio
+        params.video_in_enabled = has_video
+        params.video_out_enabled = has_video
 
-        publisher_settings = self.VonagePublisherSettings(has_audio=has_audio, has_video=has_video)
-        client = self.VonageClient(
-            self.application_id, self.session_id, self.token, params, publisher_settings
-        )
+        client = await self._create_client(params)
 
         # Mock the connect method to return True
         self.mock_client_instance.connect.return_value = True
@@ -368,14 +506,14 @@ class TestVonageVideoWebrtcTransport:
                     format=self.VonageClient.vonage_image_format(params.video_out_color_format),
                 ),
             ),
-            enable_migration=params.enable_migration,
+            enable_migration=params.session_enable_migration,
             logging=MockLoggingSettings(level="INFO"),
         )
         assert call_args[1]["on_audio_data_cb"] == client._on_session_audio_data_cb
         assert call_args[1]["on_error_cb"] == client._on_session_error_cb
         assert call_args[1]["on_connected_cb"] == client._on_session_connected_cb
         assert call_args[1]["on_disconnected_cb"] == client._on_session_disconnected_cb
-        assert call_args[1]["on_ready_for_audio_cb"] == client._on_session_ready_for_audio_cb
+        assert call_args[1]["on_ready_for_audio_cb"] is not None
         assert call_args[1]["on_stream_received_cb"] == client._on_stream_received_cb
         assert call_args[1]["on_stream_dropped_cb"] == client._on_stream_dropped_cb
 
@@ -395,32 +533,28 @@ class TestVonageVideoWebrtcTransport:
         self, has_audio: bool, has_video: bool
     ) -> None:
         """Test VonageClient publishes after being connected method for first connection."""
-        params = self.VonageClientParams()
+        params = self.VonageVideoWebrtcTransportParams()
 
         # make changes to params depending on the configuration to check the right value
         # goes to the right destination
-        publisher_settings = self.VonagePublisherSettings(
-            has_audio=has_audio,
-            has_video=has_video,
-            enable_stereo_mode=has_video,
-            enable_opus_dtx=not has_video,
-        )
-        client = self.VonageClient(
-            self.application_id, self.session_id, self.token, params, publisher_settings
-        )
+        params.audio_in_enabled = has_audio
+        params.audio_out_enabled = has_audio
+        params.video_in_enabled = has_video
+        params.video_out_enabled = has_video
+        params.audio_out_channels = 2 if has_video else 1
+        params.publisher_enable_opus_dtx = not has_video
+        params.publisher_name = "test-audio" if has_audio else "test-video"
 
-        # Mock the connect method to return True
-        self.mock_client_instance.connect.return_value = True
-
-        # only set this callback if we have audio enabled
-        if has_audio:
-            self._setup_audio_ready_callback(client)
+        client = await self._create_client(params)
         await client.connect()
 
         self.mock_client_instance.connect.assert_called_once()
 
         # trigger the _on_session_connected_cb to simulate being connected
-        client._on_session_connected_cb(vonage_video_mock.models.Session())
+        await self._run_in_thread(
+            lambda: client._on_session_connected_cb(vonage_video_mock.models.Session())
+        )
+        await self._wait_client_async_tasks(client)
 
         # if no audio and no video, publish should not be called
         if not has_audio and not has_video:
@@ -431,10 +565,10 @@ class TestVonageVideoWebrtcTransport:
         self.mock_client_instance.publish.assert_called_once()
         call_args = self.mock_client_instance.publish.call_args
         assert call_args[1]["settings"] == MockPublisherSettings(
-            name=publisher_settings.name,
+            name=params.publisher_name,
             audio_settings=MockPublisherAudioSettings(
-                enable_stereo_mode=publisher_settings.enable_stereo_mode,
-                enable_opus_dtx=publisher_settings.enable_opus_dtx,
+                enable_stereo_mode=params.audio_out_channels == 2,
+                enable_opus_dtx=params.publisher_enable_opus_dtx,
             ),
             has_audio=has_audio,
             has_video=has_video,
@@ -446,16 +580,8 @@ class TestVonageVideoWebrtcTransport:
     @pytest.mark.asyncio
     async def test_vonage_client_connect_already_connected(self) -> None:
         """Test VonageClient connect when already connected."""
-        params = self.VonageClientParams()
-        publisher_settings = self.VonagePublisherSettings(has_audio=True)
-        client = self.VonageClient(
-            self.application_id, self.session_id, self.token, params, publisher_settings
-        )
-
-        self._setup_audio_ready_callback(client)
-
-        # Mock the connect method to return True
-        self.mock_client_instance.connect.return_value = True
+        params = self.VonageVideoWebrtcTransportParams(audio_in_enabled=True)
+        client = await self._create_client(params)
 
         # add some listeners, tests multiple listeners are notified, test no notifiaction after removal too
         listener1 = self.VonageClientListener()
@@ -485,16 +611,90 @@ class TestVonageVideoWebrtcTransport:
         listener3.on_connected.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_vonage_client_connect_while_disconnecting(self) -> None:
+        """Test VonageClient waits for disconnect to complete before connecting."""
+        params = self.VonageVideoWebrtcTransportParams(audio_in_enabled=True)
+        client = await self._create_client(params)
+
+        self.mock_client_instance.disconnect = MagicMock()
+
+        # Simulate disconnect in progress
+        disconnect_future = asyncio.get_running_loop().create_future()
+        client._disconnecting_future = disconnect_future
+
+        # Start connect task - it should block waiting for disconnect
+        connect_task = asyncio.create_task(client.connect())
+
+        # Give control to the event loop to let connect task start
+        await asyncio.sleep(0.2)
+
+        self.mock_client_instance.connect.assert_not_called()
+
+        # Resolve the disconnect future to unblock connect
+        disconnect_future.set_result(None)
+
+        # Wait for connect to complete
+        await connect_task
+
+        self.mock_client_instance.connect.assert_called_once()
+
+        # Verify client state
+        assert client._connected is True
+        assert client._connection_counter == 1
+
+    @pytest.mark.asyncio
+    async def test_vonage_client_timeout_while_connecting(self) -> None:
+        """Test VonageClient handles timeout during connection."""
+        params = self.VonageVideoWebrtcTransportParams(audio_in_enabled=True)
+        client = await self._create_client(params, setup_connect_mock=False)
+
+        # Create an event that will block but can be interrupted
+        stop_event = threading.Event()
+
+        # Mock the SDK connect method to block until interrupted
+        def connect_blocks_forever(*args: Any, **kwargs: Any) -> bool:
+            stop_event.wait(timeout=10)  # Wait max 10 seconds but can be interrupted
+            return True
+
+        self.mock_client_instance.connect.side_effect = connect_blocks_forever
+
+        try:
+            # Patch the timeout to be very short for fast test execution
+            with patch(
+                "pipecat.transports.vonage.video_webrtc.VIDEO_CONNECTOR_TIMEOUT",
+                timedelta(seconds=0.1),
+            ):
+                # Attempt to connect, should timeout
+                with pytest.raises(asyncio.TimeoutError):
+                    await client.connect()
+
+                # Verify client state after timeout
+                assert client._connected is False
+                assert client._connection_counter == 0
+                assert client._connecting_future is None
+        finally:
+            # Stop the blocking thread
+            stop_event.set()
+
+    @pytest.mark.asyncio
     async def test_vonage_client_concurrent_connects(self) -> None:
         """Test VonageClient concurrent connects."""
-        params = self.VonageClientParams()
-        publisher_settings = self.VonagePublisherSettings(has_audio=True)
-        client = self.VonageClient(
-            self.application_id, self.session_id, self.token, params, publisher_settings
+        params = self.VonageVideoWebrtcTransportParams(audio_in_enabled=True)
+        client = await self._create_client(params)
+
+        # Mock the connect method to return True and store the callback
+        connecting_future: asyncio.Future[Callable[[Any], None]] = (
+            asyncio.get_running_loop().create_future()
         )
 
-        # Mock the connect method to return True
-        self.mock_client_instance.connect.return_value = True
+        def connect_side_effect(
+            *_: Any, on_ready_for_audio_cb: Optional[Callable[[Any], None]] = None, **__: Any
+        ) -> bool:
+            assert on_ready_for_audio_cb is not None
+            connecting_future.set_result(on_ready_for_audio_cb)
+            return True
+
+        self.mock_client_instance.connect = MagicMock(side_effect=connect_side_effect)
 
         # create a listener
         listener = self.VonageClientListener()
@@ -505,13 +705,10 @@ class TestVonageVideoWebrtcTransport:
         connect1_task = asyncio.create_task(client.connect())
         connect2_task = asyncio.create_task(client.connect())
 
-        # wait for the publish_ready promise be created
-        # Wait for both tasks to reach the await (they will be pending on _publish_ready)
-        while not client._publish_ready:
-            await asyncio.sleep(0.01)
+        audio_ready_cb = await connecting_future
 
         # Now both connects are waiting on the same promise, we can set it to complete
-        client._on_session_ready_for_audio_cb(vonage_video_mock.models.Session())
+        audio_ready_cb(vonage_video_mock.models.Session())
 
         # await for the connections to now complete
         await asyncio.gather(connect1_task, connect2_task)
@@ -523,11 +720,7 @@ class TestVonageVideoWebrtcTransport:
     @pytest.mark.asyncio
     async def test_vonage_client_connect_failure(self) -> None:
         """Test VonageClient connect method when connection fails."""
-        params = self.VonageClientParams()
-        publisher_settings = self.VonagePublisherSettings()
-        client = self.VonageClient(
-            self.application_id, self.session_id, self.token, params, publisher_settings
-        )
+        client = await self._create_client(setup_connect_mock=False)
 
         # Mock the connect method to return False
         self.mock_client_instance.connect.return_value = False
@@ -540,11 +733,7 @@ class TestVonageVideoWebrtcTransport:
     @pytest.mark.asyncio
     async def test_vonage_client_disconnect_before_connecting(self) -> None:
         """Test VonageClient disconnect method before connecting."""
-        params = self.VonageClientParams()
-        publisher_settings = self.VonagePublisherSettings()
-        client = self.VonageClient(
-            self.application_id, self.session_id, self.token, params, publisher_settings
-        )
+        client = await self._create_client()
 
         listener = self.VonageClientListener()
         listener.on_disconnected = AsyncMock()
@@ -558,15 +747,7 @@ class TestVonageVideoWebrtcTransport:
     @pytest.mark.asyncio
     async def test_vonage_client_disconnect(self) -> None:
         """Test VonageClient disconnect method."""
-        params = self.VonageClientParams()
-        publisher_settings = self.VonagePublisherSettings(has_audio=True)
-        client = self.VonageClient(
-            self.application_id, self.session_id, self.token, params, publisher_settings
-        )
-
-        # Mock the connect method to return True
-        self.mock_client_instance.connect.return_value = True
-        self._setup_audio_ready_callback(client)
+        client = await self._create_client()
 
         # create a listener
         listener = self.VonageClientListener()
@@ -580,53 +761,314 @@ class TestVonageVideoWebrtcTransport:
         # await for the connections to now complete
         await asyncio.gather(connect_promise1, connect_promise2)
 
+        # Add some items to the queues before disconnect
+        assert client._event_queue is not None
+        assert client._audio_queue is not None
+        assert client._video_queue is not None
+
+        async def mock_event_task() -> None:
+            pass
+
+        async def mock_audio_task() -> None:
+            pass
+
+        async def mock_video_task() -> None:
+            pass
+
+        await client._event_queue.put(mock_event_task())
+        await client._audio_queue.put(mock_audio_task())
+        await client._video_queue.put(mock_video_task())
+
+        # Verify queues have items
+        assert client._event_queue.qsize() == 1
+        assert client._audio_queue.qsize() == 1
+        assert client._video_queue.qsize() == 1
+
+        # Mock the client's clear_media_buffers method
+        self.mock_client_instance.clear_media_buffers = MagicMock()
+
         # send the first disconnect call, we should still be connected
         await client.disconnect()
         self.mock_client_instance.disconnect.assert_not_called()
+        self.mock_client_instance.clear_media_buffers.assert_not_called()
         listener.on_disconnected.assert_not_called()
+
+        # Queues should still have items since we didn't actually disconnect
+        assert client._event_queue.qsize() == 1
+        assert client._audio_queue.qsize() == 1
+        assert client._video_queue.qsize() == 1
 
         # check the second disconnect now disconnects for real
         await client.disconnect()
         self.mock_client_instance.disconnect.assert_called_once()
+        self.mock_client_instance.clear_media_buffers.assert_called_once()
         listener.on_disconnected.assert_called_once()
+
+        # Verify queues are now empty after disconnect
+        assert client._event_queue.qsize() == 0
+        assert client._audio_queue.qsize() == 0
+        assert client._video_queue.qsize() == 0
 
         # an extra disconnect should not do anything
         await client.disconnect()
         self.mock_client_instance.disconnect.assert_called_once()
+        self.mock_client_instance.clear_media_buffers.assert_called_once()
         listener.on_disconnected.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_vonage_client_disconnect_while_connecting(self) -> None:
+        """Test VonageClient waits for connect to complete before disconnecting."""
+        params = self.VonageVideoWebrtcTransportParams(audio_in_enabled=True)
+        client = await self._create_client(params)
+
+        client._connected = True
+        client._connection_counter = 1
+        self.mock_client_instance.connect = MagicMock()
+
+        # Simulate connect in progress
+        connect_future = asyncio.get_running_loop().create_future()
+        client._connecting_future = connect_future
+
+        # Start disconnect task - it should block waiting for disconnect
+        disconnect_task = asyncio.create_task(client.disconnect())
+
+        # Give control to the event loop to let disconnect task start
+        await asyncio.sleep(0.2)
+
+        self.mock_client_instance.disconnect.assert_not_called()
+
+        # Resolve the disconnect future to unblock connect
+        connect_future.set_result(None)
+
+        # Wait for connect to complete
+        await disconnect_task
+
+        self.mock_client_instance.disconnect.assert_called_once()
+
+        # Verify client state
+        assert client._connected is False
+        assert client._connection_counter == 0
+
+    @pytest.mark.asyncio
+    async def test_vonage_client_timeout_while_disconnecting(self) -> None:
+        """Test VonageClient handles timeout during disconnection."""
+        params = self.VonageVideoWebrtcTransportParams(audio_in_enabled=True)
+        client = await self._create_client(params, setup_connect_mock=False)
+
+        await client.connect()
+        assert client._connection_counter == 1
+
+        # Create an event that will block but can be interrupted
+        stop_event = threading.Event()
+
+        # Mock the SDK disconnect method to block until interrupted
+        def disconnect_blocks_forever(*args: Any, **kwargs: Any) -> bool:
+            stop_event.wait(timeout=10)  # Wait max 10 seconds but can be interrupted
+            return True
+
+        self.mock_client_instance.disconnect.side_effect = disconnect_blocks_forever
+        try:
+            # Patch the timeout to be very short for fast test execution
+            with patch(
+                "pipecat.transports.vonage.video_webrtc.VIDEO_CONNECTOR_TIMEOUT",
+                timedelta(seconds=0.1),
+            ):
+                # Attempt to connect, should timeout
+                with pytest.raises(asyncio.TimeoutError):
+                    await client.disconnect()
+
+                # Verify client state after timeout
+                assert client._connected is True
+                assert client._connection_counter == 1
+                assert client._disconnecting_future is None
+        finally:
+            # Stop the blocking thread
+            stop_event.set()
+
+    @pytest.mark.asyncio
+    async def test_vonage_client_clear_media_buffers(self) -> None:
+        """Test VonageClient clear_media_buffers method."""
+        params = self.VonageVideoWebrtcTransportParams(
+            audio_out_channels=2, audio_out_sample_rate=48000
+        )
+        client = await self._create_client(params)
+
+        # Add some items to the audio and video queues
+        assert client._audio_queue is not None
+        assert client._video_queue is not None
+
+        # Create mock coroutines to add to queues
+        async def mock_audio_task() -> None:
+            pass
+
+        async def mock_video_task() -> None:
+            pass
+
+        # Put some items in the queues
+        await client._audio_queue.put(mock_audio_task())
+        await client._audio_queue.put(mock_audio_task())
+        await client._video_queue.put(mock_video_task())
+
+        # Verify queues have items
+        assert client._audio_queue.qsize() == 2
+        assert client._video_queue.qsize() == 1
+
+        # Mock the client's clear_media_buffers method
+        self.mock_client_instance.clear_media_buffers = MagicMock()
+
+        # Clear the buffers
+        client.clear_media_buffers()
+
+        # Verify queues are now empty
+        assert client._audio_queue.qsize() == 0
+        assert client._video_queue.qsize() == 0
+
+        # Verify the SDK client's clear_media_buffers was called
+        self.mock_client_instance.clear_media_buffers.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("pipecat.transports.vonage.video_webrtc.EVENT_QUEUE_MAXSIZE", 1)
+    async def test_vonage_client_sdk_cb_to_loop_full_queue(self) -> None:
+        """Test VonageClient SDK callback to loop filling up the queue."""
+        params = self.VonageVideoWebrtcTransportParams()
+        client = await self._create_client(params)
+
+        # Ensure the loop thread ID is set
+        assert client._event_queue is not None
+        assert client._loop_thread_id == threading.get_ident()
+
+        # Create a mock coroutine to queue
+        async def mock_task() -> None:
+            pass
+
+        # Fill queue to max size
+        for _ in range(client._event_queue.maxsize):
+            await client._event_queue.put(mock_task())
+
+        # Queue should be full
+        assert client._event_queue.qsize() == client._event_queue.maxsize
+
+        # This should log an error and drop the event
+        async_task = mock_task()
+        client._sdk_cb_to_loop("test_event", client._event_queue, async_task)
+
+        # Queue should still be full (no new item added)
+        assert client._event_queue.qsize() == client._event_queue.maxsize
+        # check the coroutine was closed and hence dropped
+        assert inspect.getcoroutinestate(async_task) == "CORO_CLOSED"
+
+        # Clean up the coroutine
+        task = await client._event_queue.get()
+        task.close()
+        client._event_queue.task_done()
+
+    @pytest.mark.asyncio
+    @patch("pipecat.transports.vonage.video_webrtc.create_stream_resampler")
+    async def test_vonage_client_get_audio_with_resampling(self, mock_resampler: MagicMock) -> None:
+        """Test VonageClient get_audio method."""
+        # Return resampled stereo data
+        resampled_data = b"\x07\x06\x05\x04\x03\x02\x01\x00"
+        mock_resampler_instance = Mock()
+        mock_resampler_instance.resample = AsyncMock(return_value=resampled_data)
+        mock_resampler.return_value = mock_resampler_instance
+
+        params = self.VonageVideoWebrtcTransportParams(
+            audio_in_channels=1,
+            audio_in_sample_rate=48000,
+            audio_in_enabled=True,
+        )
+        client = await self._create_client(params)
+        listener = self.VonageClientListener()
+        on_audio_in_mock = AsyncMock()
+        listener.on_audio_in = on_audio_in_mock
+        client.add_listener(listener)
+
+        await client.connect()
+
+        mock_audio_data = vonage_video_mock.models.AudioData(
+            sample_buffer=memoryview(b"\x00\x01\x02\x03\x04\x05\x06\x07"),
+            number_of_frames=4,
+            number_of_channels=1,
+            sample_rate=16000,
+        )
+
+        session = vonage_video_mock.models.Session(id="test_session")
+        client._on_session_audio_data_cb(session, mock_audio_data)
+        await self._wait_for_condition(lambda: on_audio_in_mock.call_count > 0)
+
+        listener.on_audio_in.assert_called_once_with(session, ANY)
+        frame = listener.on_audio_in.call_args[0][1]
+        assert frame.audio == resampled_data
+        assert frame.num_frames == 4
+        assert frame.sample_rate == 48000
+        assert frame.num_channels == 1
 
     @pytest.mark.asyncio
     async def test_vonage_client_write_audio(self) -> None:
         """Test VonageClient write_audio method."""
-        params = self.VonageClientParams(audio_out_channels=2, audio_out_sample_rate=48000)
-        publisher_settings = self.VonagePublisherSettings()
-        client = self.VonageClient(
-            self.application_id, self.session_id, self.token, params, publisher_settings
+        params = self.VonageVideoWebrtcTransportParams(
+            audio_out_channels=2, audio_out_sample_rate=48000
         )
+        client = await self._create_client(params)
 
         # Create mock audio data
-        audio_data = b"\x00\x01\x02\x03\x04\x05\x06\x07"  # 4 frames of 2-channel 16-bit audio
+        audio_data = OutputAudioRawFrame(
+            audio=b"\x00\x01\x02\x03\x04\x05\x06\x07",
+            sample_rate=48000,
+            num_channels=2,
+        )  # 4 frames of 2-channel 16-bit audio
 
         await client.write_audio(audio_data)
 
         self.mock_client_instance.add_audio.assert_called_once()
         call_args = self.mock_client_instance.add_audio.call_args[0][0]
+        assert call_args.sample_buffer.tobytes() == audio_data.audio
         assert call_args.number_of_frames == 2  # 8 bytes / (2 channels * 2 bytes)
         assert call_args.number_of_channels == 2
         assert call_args.sample_rate == 48000
 
     @pytest.mark.asyncio
+    @patch("pipecat.transports.vonage.video_webrtc.create_stream_resampler")
+    async def test_vonage_client_write_audio_with_resampling(
+        self, mock_resampler: MagicMock
+    ) -> None:
+        """Test VonageClient write_audio method."""
+        # Return resampled stereo data
+        resampled_data = b"\x07\x06\x05\x04\x03\x02\x01\x00"
+        mock_resampler_instance = Mock()
+        mock_resampler_instance.resample = AsyncMock(return_value=resampled_data)
+        mock_resampler.return_value = mock_resampler_instance
+
+        params = self.VonageVideoWebrtcTransportParams(
+            audio_out_channels=1, audio_out_sample_rate=16000
+        )
+        client = await self._create_client(params)
+
+        # Create mock audio data
+        audio_data = OutputAudioRawFrame(
+            audio=b"\x00\x01\x02\x03\x04\x05\x06\x07",
+            sample_rate=48000,
+            num_channels=1,
+        )  # 4 frames of 1-channel 16-bit audio
+
+        await client.write_audio(audio_data)
+
+        self.mock_client_instance.add_audio.assert_called_once()
+        call_args = self.mock_client_instance.add_audio.call_args[0][0]
+        assert call_args.sample_buffer.tobytes() == resampled_data
+        assert call_args.number_of_frames == 4  # 8 bytes / (1 channel * 2 bytes)
+        assert call_args.number_of_channels == 1
+        assert call_args.sample_rate == 16000
+
+    @pytest.mark.asyncio
     async def test_vonage_client_write_video(self) -> None:
         """Test VonageClient write_video method."""
-        params = self.VonageClientParams(
+        params = self.VonageVideoWebrtcTransportParams(
             video_out_width=640,
             video_out_height=480,
             video_out_color_format="RGB",
         )
-        publisher_settings = self.VonagePublisherSettings()
-        client = self.VonageClient(
-            self.application_id, self.session_id, self.token, params, publisher_settings
-        )
+        client = await self._create_client(params)
 
         # Create a test RGB image (640x480, 3 channels)
         width, height = 640, 480
@@ -673,11 +1115,13 @@ class TestVonageVideoWebrtcTransport:
     @pytest.mark.asyncio
     async def test_vonage_client_events(self) -> None:
         """Test VonageClient events"""
-        params = self.VonageClientParams()
-        publisher_settings = self.VonagePublisherSettings(has_audio=True)
-        client = self.VonageClient(
-            self.application_id, self.session_id, self.token, params, publisher_settings
+        params = self.VonageVideoWebrtcTransportParams(
+            audio_in_enabled=True,
+            audio_out_enabled=True,
+            audio_in_sample_rate=48000,
+            audio_in_channels=2,
         )
+        client = await self._create_client(params)
 
         # Mock the connect method to return True
         self.mock_client_instance.connect.return_value = True
@@ -687,7 +1131,7 @@ class TestVonageVideoWebrtcTransport:
         listener = self.VonageClientListener()
         on_error_mock = AsyncMock()
         listener.on_error = on_error_mock
-        on_audio_in_mock = MagicMock()
+        on_audio_in_mock = AsyncMock()
         listener.on_audio_in = on_audio_in_mock
         on_stream_received_mock = AsyncMock()
         listener.on_stream_received = on_stream_received_mock
@@ -724,8 +1168,13 @@ class TestVonageVideoWebrtcTransport:
         )
 
         client._on_session_audio_data_cb(session, mock_audio_data)
+        await self._wait_for_condition(lambda: on_audio_in_mock.call_count > 0)
 
-        listener.on_audio_in.assert_called_once_with(session, mock_audio_data)
+        listener.on_audio_in.assert_called_once_with(session, ANY)
+        frame = listener.on_audio_in.call_args[0][1]
+        assert frame.audio == audio_buffer.tobytes()
+        assert frame.sample_rate == 48000
+        assert frame.num_channels == 2
         listener.on_audio_in.reset_mock()
 
         # Test _on_stream_received_cb triggers on_stream_received
@@ -781,36 +1230,23 @@ class TestVonageVideoWebrtcTransport:
         client._on_subscriber_error_cb(subscriber, "subscriber error", 401)
 
     @pytest.mark.asyncio
-    @patch("pipecat.transports.vonage.video_webrtc.create_stream_resampler")
-    async def test_vonage_input_transport_initialization(self, mock_resampler: MagicMock) -> None:
+    async def test_vonage_input_transport_initialization(self) -> None:
         """Test VonageVideoWebrtcInputTransport initialization."""
-        mock_resampler.return_value = Mock()
-        params = self.VonageClientParams()
-        publisher_settings = self.VonagePublisherSettings()
-        client = self.VonageClient(
-            self.application_id, self.session_id, self.token, params, publisher_settings
-        )
+        params = self.VonageVideoWebrtcTransportParams()
+        client = self.VonageClient(self.application_id, self.session_id, self.token, params)
 
         transport_params = self.VonageVideoWebrtcTransportParams(audio_in_enabled=True)
         transport = self.VonageVideoWebrtcInputTransport(client, transport_params)
 
         assert transport._client == client
         assert transport._initialized is False
-        mock_resampler.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("pipecat.transports.vonage.video_webrtc.create_stream_resampler")
-    async def test_vonage_input_transport_start(self, mock_resampler: MagicMock) -> None:
+    async def test_vonage_input_transport_start(self) -> None:
         """Test VonageVideoWebrtcInputTransport start method."""
-        mock_resampler.return_value = Mock()
-        params = self.VonageClientParams()
-        publisher_settings = self.VonagePublisherSettings()
-        client = self.VonageClient(
-            self.application_id, self.session_id, self.token, params, publisher_settings
-        )
-
-        transport_params = self.VonageVideoWebrtcTransportParams(audio_in_enabled=True)
-        transport = self.VonageVideoWebrtcInputTransport(client, transport_params)
+        params = self.VonageVideoWebrtcTransportParams(audio_in_enabled=True)
+        client = self.VonageClient(self.application_id, self.session_id, self.token, params)
+        transport = self.VonageVideoWebrtcInputTransport(client, params)
 
         # Mock the client connect method
         with (
@@ -826,18 +1262,11 @@ class TestVonageVideoWebrtcTransport:
             set_transport_ready_mock.assert_called_once_with(start_frame)
 
     @pytest.mark.asyncio
-    @patch("pipecat.transports.vonage.video_webrtc.create_stream_resampler")
-    async def test_vonage_input_transport_stop(self, mock_resampler: MagicMock) -> None:
+    async def test_vonage_input_transport_stop(self) -> None:
         """Test VonageVideoWebrtcInputTransport stop method."""
-        mock_resampler.return_value = Mock()
-        params = self.VonageClientParams()
-        publisher_settings = self.VonagePublisherSettings()
-        client = self.VonageClient(
-            self.application_id, self.session_id, self.token, params, publisher_settings
-        )
-
-        transport_params = self.VonageVideoWebrtcTransportParams(audio_in_enabled=True)
-        transport = self.VonageVideoWebrtcInputTransport(client, transport_params)
+        params = self.VonageVideoWebrtcTransportParams(audio_in_enabled=True)
+        client = self.VonageClient(self.application_id, self.session_id, self.token, params)
+        transport = self.VonageVideoWebrtcInputTransport(client, params)
         transport._listener_id = 1
         transport._connected = True
 
@@ -853,18 +1282,12 @@ class TestVonageVideoWebrtcTransport:
             assert not transport._connected
 
     @pytest.mark.asyncio
-    @patch("pipecat.transports.vonage.video_webrtc.create_stream_resampler")
-    async def test_vonage_input_transport_cancel(self, mock_resampler: MagicMock) -> None:
+    async def test_vonage_input_transport_cancel(self) -> None:
         """Test VonageVideoWebrtcInputTransport cancel method."""
-        mock_resampler.return_value = Mock()
-        params = self.VonageClientParams()
-        publisher_settings = self.VonagePublisherSettings()
-        client = self.VonageClient(
-            self.application_id, self.session_id, self.token, params, publisher_settings
-        )
+        params = self.VonageVideoWebrtcTransportParams(audio_in_enabled=True)
+        client = self.VonageClient(self.application_id, self.session_id, self.token, params)
 
-        transport_params = self.VonageVideoWebrtcTransportParams(audio_in_enabled=True)
-        transport = self.VonageVideoWebrtcInputTransport(client, transport_params)
+        transport = self.VonageVideoWebrtcInputTransport(client, params)
         transport._listener_id = 1
         transport._connected = True
 
@@ -880,54 +1303,23 @@ class TestVonageVideoWebrtcTransport:
             remove_listener_mock.assert_called_once_with(1)
             assert not transport._connected
 
-    async def create_output_transport(
-        self, params: VonageVideoWebrtcTransportParams
-    ) -> VonageVideoWebrtcOutputTransport:
-        publisher_settings = VonagePublisherSettings()
-        client = self.VonageClient(
-            self.application_id,
-            self.session_id,
-            self.token,
-            self.VonageClientParams(),
-            publisher_settings,
-        )
-
-        clock: SystemClock = SystemClock()  # type: ignore[no-untyped-call]
-        task_manager = TaskManager()
-        task_manager.setup(TaskManagerParams(loop=asyncio.get_event_loop()))
-        transport = self.VonageVideoWebrtcOutputTransport(client, params)
-        await transport.setup(FrameProcessorSetup(clock=clock, task_manager=task_manager))
-
-        return transport
-
     @pytest.mark.asyncio
-    @patch("pipecat.transports.vonage.video_webrtc.create_stream_resampler")
-    async def test_vonage_output_transport_initialization(self, mock_resampler: MagicMock) -> None:
+    async def test_vonage_output_transport_initialization(self) -> None:
         """Test VonageVideoWebrtcOutputTransport initialization."""
-        mock_resampler.return_value = Mock()
-        params = self.VonageClientParams()
-        publisher_settings = self.VonagePublisherSettings()
-        client = self.VonageClient(
-            self.application_id, self.session_id, self.token, params, publisher_settings
-        )
+        params = self.VonageVideoWebrtcTransportParams()
+        client = self.VonageClient(self.application_id, self.session_id, self.token, params)
 
         transport_params = self.VonageVideoWebrtcTransportParams(audio_out_enabled=True)
         transport = self.VonageVideoWebrtcOutputTransport(client, transport_params)
 
         assert transport._client == client
         assert transport._initialized is False
-        mock_resampler.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("pipecat.transports.vonage.video_webrtc.create_stream_resampler")
-    async def test_vonage_output_transport_start(self, mock_resampler: MagicMock) -> None:
+    async def test_vonage_output_transport_start(self) -> None:
         """Test VonageVideoWebrtcOutputTransport start method."""
-        mock_resampler.return_value = Mock()
-        params = self.VonageClientParams()
-        publisher_settings = self.VonagePublisherSettings()
-        client = self.VonageClient(
-            self.application_id, self.session_id, self.token, params, publisher_settings
-        )
+        params = self.VonageVideoWebrtcTransportParams()
+        client = self.VonageClient(self.application_id, self.session_id, self.token, params)
 
         transport_params = self.VonageVideoWebrtcTransportParams(audio_out_enabled=True)
         transport = self.VonageVideoWebrtcOutputTransport(client, transport_params)
@@ -944,25 +1336,15 @@ class TestVonageVideoWebrtcTransport:
             set_transport_ready_mock.assert_called_once_with(start_frame)
 
     @pytest.mark.asyncio
-    @patch("pipecat.transports.vonage.video_webrtc.create_stream_resampler")
-    async def test_vonage_output_transport_write_audio_frame(
-        self, mock_resampler: MagicMock
-    ) -> None:
+    async def test_vonage_output_transport_write_audio_frame(self) -> None:
         """Test VonageVideoWebrtcOutputTransport write_audio_frame method."""
-        mock_resampler_instance = Mock()
-        mock_resampler_instance.resample = AsyncMock(return_value=b"\x00\x01\x02\x03")
-        mock_resampler.return_value = mock_resampler_instance
 
-        params = self.VonageClientParams(audio_out_sample_rate=48000, audio_out_channels=2)
-        publisher_settings = self.VonagePublisherSettings()
-        client = self.VonageClient(
-            self.application_id, self.session_id, self.token, params, publisher_settings
+        params = self.VonageVideoWebrtcTransportParams(
+            audio_out_sample_rate=48000, audio_out_channels=2, audio_out_enabled=True
         )
+        client = self.VonageClient(self.application_id, self.session_id, self.token, params)
 
-        with (
-            patch.object(client, "write_audio", AsyncMock()) as client_write_audio_mock,
-            patch.object(client, "get_params", Mock(return_value=params)),
-        ):
+        with patch.object(client, "write_audio", AsyncMock()) as client_write_audio_mock:
             transport_params = self.VonageVideoWebrtcTransportParams(audio_out_enabled=True)
             transport = self.VonageVideoWebrtcOutputTransport(client, transport_params)
             transport._connected = True
@@ -974,17 +1356,13 @@ class TestVonageVideoWebrtcTransport:
 
             await transport.write_audio_frame(audio_frame)
 
-            # Verify resampling was called
-            mock_resampler_instance.resample.assert_called_once_with(
-                audio_frame.audio, 16000, 48000
-            )
             # Verify audio was written to client
-            client_write_audio_mock.assert_called_once()
+            client_write_audio_mock.assert_called_once_with(audio_frame)
 
     @pytest.mark.asyncio
     async def test_vonage_output_transport_write_video_frame_not_connected(self) -> None:
         """Test VonageVideoWebrtcOutputTransport write_video_frame method."""
-        transport = await self.create_output_transport(
+        transport = await self._create_output_transport(
             params=self.VonageVideoWebrtcTransportParams(video_out_enabled=True)
         )
         client = transport._client
@@ -1011,7 +1389,7 @@ class TestVonageVideoWebrtcTransport:
     @pytest.mark.asyncio
     async def test_vonage_output_transport_write_video_frame_connected(self) -> None:
         """Test VonageVideoWebrtcOutputTransport write_video_frame method when connected."""
-        transport = await self.create_output_transport(
+        transport = await self._create_output_transport(
             params=self.VonageVideoWebrtcTransportParams(
                 video_out_enabled=True,
                 video_out_width=640,
@@ -1043,7 +1421,7 @@ class TestVonageVideoWebrtcTransport:
     @pytest.mark.asyncio
     async def test_vonage_output_transport_write_video_frame_invalid_size(self) -> None:
         """Test VonageVideoWebrtcOutputTransport write_video_frame with invalid frame size."""
-        transport = await self.create_output_transport(
+        transport = await self._create_output_transport(
             params=self.VonageVideoWebrtcTransportParams(
                 video_out_enabled=True,
                 video_out_width=640,
@@ -1069,7 +1447,7 @@ class TestVonageVideoWebrtcTransport:
     @pytest.mark.asyncio
     async def test_vonage_output_transport_write_video_frame_invalid_format(self) -> None:
         """Test VonageVideoWebrtcOutputTransport write_video_frame with invalid color format."""
-        transport = await self.create_output_transport(
+        transport = await self._create_output_transport(
             params=self.VonageVideoWebrtcTransportParams(
                 video_out_enabled=True,
                 video_out_width=640,
@@ -1095,7 +1473,7 @@ class TestVonageVideoWebrtcTransport:
     @pytest.mark.asyncio
     async def test_vonage_output_transport_process_frame_with_interruption(self) -> None:
         """Test VonageVideoWebrtcOutputTransport process_frame method with InterruptionFrame."""
-        transport = await self.create_output_transport(
+        transport = await self._create_output_transport(
             params=self.VonageVideoWebrtcTransportParams(audio_out_enabled=True)
         )
         client = transport._client
@@ -1114,7 +1492,7 @@ class TestVonageVideoWebrtcTransport:
     @pytest.mark.asyncio
     async def test_vonage_output_transport_process_frame_without_interruption(self) -> None:
         """Test VonageVideoWebrtcOutputTransport process_frame method with non-interruption frame."""
-        transport = await self.create_output_transport(
+        transport = await self._create_output_transport(
             params=self.VonageVideoWebrtcTransportParams(audio_out_enabled=True)
         )
         client = transport._client
@@ -1131,7 +1509,7 @@ class TestVonageVideoWebrtcTransport:
     @pytest.mark.asyncio
     async def test_vonage_output_transport_process_frame_when_not_connected(self) -> None:
         """Test VonageVideoWebrtcOutputTransport process_frame method when not connected."""
-        transport = await self.create_output_transport(
+        transport = await self._create_output_transport(
             params=self.VonageVideoWebrtcTransportParams(audio_out_enabled=True)
         )
         await transport.stop(EndFrame())  # Ensure transport is not connected
@@ -1155,10 +1533,7 @@ class TestVonageVideoWebrtcTransport:
             publisher_name="test-publisher",
             publisher_enable_opus_dtx=True,
         )
-
-        transport = self.VonageVideoWebrtcTransport(
-            self.application_id, self.session_id, self.token, params
-        )
+        transport = await self._create_transport(params=params)
 
         assert transport._client is not None
         assert transport._one_stream_received is False
@@ -1167,7 +1542,7 @@ class TestVonageVideoWebrtcTransport:
         client_params = transport._client._params
         assert client_params.audio_out_sample_rate == 48000
         assert client_params.audio_out_channels == 2
-        assert client_params.enable_migration is True
+        assert client_params.session_enable_migration is True
 
     @pytest.mark.asyncio
     async def test_vonage_transport_input_output_methods(self) -> None:
@@ -1190,86 +1565,38 @@ class TestVonageVideoWebrtcTransport:
         assert transport.output() is output_transport
 
     @pytest.mark.asyncio
-    @patch("pipecat.transports.vonage.video_webrtc.asyncio.run_coroutine_threadsafe")
-    @patch("pipecat.transports.vonage.video_webrtc.create_stream_resampler")
-    async def test_vonage_input_audio_callback(
-        self, mock_resampler: MagicMock, mock_run_coroutine: MagicMock
-    ) -> None:
+    async def test_vonage_input_audio_callback(self) -> None:
         """Test audio input callback processing."""
-        resampled_audio = b"\x00\x01\x02\x03"
-        resampled_bitrate = 26000
-        mock_resampler_instance = Mock()
-        mock_resampler_instance.resample = AsyncMock(return_value=resampled_audio)
-        mock_resampler.return_value = mock_resampler_instance
 
-        push_frame_coroutine: Optional[Awaitable[None]] = None
-
-        # Mock the run_coroutine_threadsafe to capture the coroutine
-        def mock_run_coro(coro: Awaitable[None], loop: asyncio.AbstractEventLoop) -> Future[None]:
-            nonlocal push_frame_coroutine
-            push_frame_coroutine = coro
-            # Return a mock task
-            task = Mock(spec=Future[None])
-            task.result.return_value = None
-            return task
-
-        mock_run_coroutine.side_effect = mock_run_coro
-
-        params = self.VonageClientParams()
-        publisher_settings = self.VonagePublisherSettings()
-        client = self.VonageClient(
-            self.application_id, self.session_id, self.token, params, publisher_settings
-        )
-
-        transport_params = self.VonageVideoWebrtcTransportParams(
+        params = self.VonageVideoWebrtcTransportParams(
             audio_in_enabled=True,
-            audio_in_sample_rate=resampled_bitrate,
         )
-        transport = self.VonageVideoWebrtcInputTransport(client, transport_params)
-        transport._listener_id = 1
+        transport = await self._create_input_transport(params)
+        client = transport._client
+
         with (
             patch.object(transport, "push_audio_frame", AsyncMock()) as mock_push_audio_frame,
-            patch.object(transport, "get_event_loop", Mock(return_value=asyncio.get_event_loop())),
             patch.object(client, "connect", AsyncMock(return_value=1)),
-            patch.object(transport, "set_transport_ready", AsyncMock()),
         ):
             start_frame = StartFrame()
             await transport.start(start_frame)
 
             # Create mock audio data
             audio_buffer = np.array([100, 200, 300, 400], dtype=np.int16)
-            mock_audio_data = Mock()
-            mock_audio_data.sample_buffer = audio_buffer.tobytes()
-            mock_audio_data.number_of_frames = 2
-            mock_audio_data.number_of_channels = 2
-            mock_audio_data.sample_rate = 48000
-
-            # Create mock session
-            mock_session = Mock()
+            audio_frame = InputAudioRawFrame(
+                audio=audio_buffer.tobytes(), sample_rate=48000, num_channels=2
+            )
 
             # Call the audio callback
-            transport._audio_in_cb(mock_session, mock_audio_data)
+            await transport._audio_in_cb(vonage_video_mock.models.Session(), audio_frame)
 
-            # Execute the captured coroutine and check it does what we expect
-            assert push_frame_coroutine is not None
-            await push_frame_coroutine
-
-            mock_push_audio_frame.assert_called_once()
-            # Verify run_coroutine_threadsafe was called
-            mock_run_coroutine.assert_called_once()
-            arg = mock_push_audio_frame.call_args[0][0]
-            assert isinstance(arg, InputAudioRawFrame)
-            assert arg.audio == resampled_audio
-            assert arg.sample_rate == resampled_bitrate
-            assert arg.num_channels == 1
+            mock_push_audio_frame.assert_called_once_with(audio_frame)
 
     @pytest.mark.asyncio
     async def test_vonage_transport_event_handlers(self) -> None:
         """Test VonageVideoWebrtcTransport event handlers."""
         params = self.VonageVideoWebrtcTransportParams()
-        transport = self.VonageVideoWebrtcTransport(
-            self.application_id, self.session_id, self.token, params
-        )
+        transport = await self._create_transport(params)
 
         with patch.object(
             transport, "_call_event_handler", new_callable=AsyncMock
@@ -1327,9 +1654,7 @@ class TestVonageVideoWebrtcTransport:
     async def test_vonage_transport_first_participant_flag(self) -> None:
         """Test that first participant event is only called once."""
         params = self.VonageVideoWebrtcTransportParams()
-        transport = self.VonageVideoWebrtcTransport(
-            self.application_id, self.session_id, self.token, params
-        )
+        transport = await self._create_transport(params)
 
         with patch.object(
             transport, "_call_event_handler", new_callable=AsyncMock

@@ -3,8 +3,12 @@
 
 import asyncio
 import itertools
+import threading
+from collections.abc import Coroutine
+from concurrent.futures import CancelledError, ThreadPoolExecutor
 from dataclasses import dataclass, replace
-from typing import Any, Awaitable, Callable, Optional, cast
+from datetime import timedelta
+from typing import Any, Awaitable, Callable, Optional, TypeVar
 
 import numpy as np
 import numpy.typing as npt
@@ -22,10 +26,11 @@ from pipecat.frames.frames import (
     OutputImageRawFrame,
     StartFrame,
 )
-from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor, FrameProcessorSetup
 from pipecat.transports.base_input import BaseInputTransport
 from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import BaseTransport, TransportParams
+from pipecat.utils.asyncio.task_manager import BaseTaskManager
 
 try:
     import vonage_video_connector as vonage_video
@@ -86,7 +91,7 @@ class VonageClientListener:
         on_connected: Async callback when session is connected.
         on_disconnected: Async callback when session is disconnected.
         on_error: Async callback for session errors.
-        on_audio_in: Callback for incoming audio data.
+        on_audio_in: Async callback for incoming audio data.
         on_stream_received: Async callback when a stream is received.
         on_stream_dropped: Async callback when a stream is dropped.
         on_subscriber_connected: Async callback when a subscriber connects.
@@ -96,66 +101,42 @@ class VonageClientListener:
     on_connected: Callable[[Session], Awaitable[None]] = async_noop
     on_disconnected: Callable[[Session], Awaitable[None]] = async_noop
     on_error: Callable[[Session, str, int], Awaitable[None]] = async_noop
-    on_audio_in: Callable[[Session, AudioData], None] = lambda _session, _audio: None
+    on_audio_in: Callable[[Session, InputAudioRawFrame], Awaitable[None]] = async_noop
     on_stream_received: Callable[[Session, Stream], Awaitable[None]] = async_noop
     on_stream_dropped: Callable[[Session, Stream], Awaitable[None]] = async_noop
     on_subscriber_connected: Callable[[Subscriber], Awaitable[None]] = async_noop
     on_subscriber_disconnected: Callable[[Subscriber], Awaitable[None]] = async_noop
+    on_subscriber_video_in: Callable[[Subscriber, VideoFrame], Awaitable[None]] = async_noop
 
 
 @dataclass
-class VonagePublisherSettings:
-    """Settings for the Vonage publisher.
+class AudioProps:
+    """Audio properties for normalization.
 
     Parameters:
-        name: Name of the publisher stream.
-        has_audio: Whether the publisher has audio.
-        has_video: Whether the publisher has video.
-        audio_settings: Audio settings for the publisher.
+        sample_rate: The sample rate of the audio.
+        is_stereo: Whether the audio is stereo (True) or mono (False).
     """
 
-    name: str = ""
-    has_audio: bool = False
-    has_video: bool = False
-    enable_stereo_mode: bool = True
-    enable_opus_dtx: bool = False
+    sample_rate: int
+    is_stereo: bool
 
 
-@dataclass
-class VonageClientParams:
-    """Parameters for the Vonage client.
+VIDEO_CONNECTOR_TIMEOUT: timedelta = timedelta(seconds=30)
+DEFAULT_SAMPLE_RATE: int = 48000
 
-    Parameters:
-        audio_in_sample_rate: Sample rate for incoming audio.
-        audio_in_channels: Number of channels for incoming audio.
-        audio_out_sample_rate: Sample rate for outgoing audio.
-        audio_out_channels: Number of channels for outgoing audio.
-        enable_migration: Whether to enable session migration.
-    """
+EVENT_QUEUE_MAXSIZE: int = 1000
+AUDIO_QUEUE_MAXSIZE: int = 500
+VIDEO_QUEUE_MAXSIZE: int = 50
 
-    audio_in_sample_rate: int = 48000
-    audio_in_channels: int = 2
-    audio_out_sample_rate: int = 48000
-    audio_out_channels: int = 2
-    enable_migration: bool = False
-    video_out_width: int = 640
-    video_out_height: int = 480
-    video_out_framerate: int = 30
-    video_out_color_format: str = "RGB"
+T = TypeVar("T", InputAudioRawFrame, OutputAudioRawFrame)
+SimpleCoroutine = Coroutine[Any, Any, None]
 
 
 class VonageClient:
     """Client for managing a Vonage Video session.
 
     Handles connection, publishing, subscribing, and event callbacks for a Vonage Video session.
-
-    Supported features:
-
-    - Connects to a Vonage Video session using provided credentials
-    - Publishes audio streams with configurable settings
-    - Subscribes to remote streams and handles audio data
-    - Manages event listeners for session and stream events
-    - Supports session migration and advanced audio options
     """
 
     def __init__(
@@ -163,8 +144,7 @@ class VonageClient:
         application_id: str,
         session_id: str,
         token: str,
-        params: VonageClientParams,
-        publisher_settings: VonagePublisherSettings,
+        params: VonageVideoWebrtcTransportParams,
     ):
         """Initialize the Vonage client.
 
@@ -172,31 +152,86 @@ class VonageClient:
             application_id: The Vonage Video application ID.
             session_id: The session ID to connect to.
             token: The authentication token for the session.
-            params: Parameters for audio and migration settings.
-            publisher_settings: Optional publisher settings for audio stream.
+            params: Parameters to configure the Vonage client.
         """
         self._client = vonage_video.VonageVideoClient()
         self._application_id: str = application_id
         self._session_id: str = session_id
         self._token: str = token
         self._params = params
+        # having these two settings separately to make them non-optional
+        self._audio_in_sample_rate = params.audio_in_sample_rate or DEFAULT_SAMPLE_RATE
+        self._audio_out_sample_rate = params.audio_out_sample_rate or DEFAULT_SAMPLE_RATE
+
         self._connected: bool = False
         self._connection_counter: int = 0
+        self._connecting_future: Optional[asyncio.Future[None]] = None
+        self._disconnecting_future: Optional[asyncio.Future[None]] = None
+
         self._listener_id_gen: itertools.count[int] = itertools.count()
         self._listeners: dict[int, VonageClientListener] = {}
-        self._publish_ready: Optional[asyncio.Future[None]] = None
-        self._publisher_settings: VonagePublisherSettings = publisher_settings
+
         self._publisher: Optional[Publisher] = None
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._session = Session(id=session_id)
 
-    def get_params(self) -> VonageClientParams:
-        """Get the parameters of the Vonage client.
+        self._resampler = create_stream_resampler()
 
-        Returns:
-            The VonageClientParams instance for this client.
+        self._task_manager: Optional[BaseTaskManager] = None
+        self._loop_thread_id = threading.get_ident()
+        self._event_queue: Optional[asyncio.Queue[SimpleCoroutine]] = None
+        self._event_task: Optional[asyncio.Task[None]] = None
+        self._audio_queue: Optional[asyncio.Queue[SimpleCoroutine]] = None
+        self._audio_task: Optional[asyncio.Task[None]] = None
+        self._video_queue: Optional[asyncio.Queue[SimpleCoroutine]] = None
+        self._video_task: Optional[asyncio.Task[None]] = None
+
+        # used for blocking calls to connect and disconnect
+        self._executor = ThreadPoolExecutor(max_workers=1)
+
+    async def setup(self, setup: FrameProcessorSetup) -> None:
+        """Setup the client with task manager and event queues.
+
+        Args:
+            setup: The frame processor setup configuration.
         """
-        return self._params
+        if self._task_manager:
+            return
+
+        self._task_manager = setup.task_manager
+
+        self._event_queue = asyncio.Queue(maxsize=EVENT_QUEUE_MAXSIZE)
+        self._event_task = self._task_manager.create_task(
+            self._sdk_cb_to_loop_task_handler(self._event_queue),
+            f"{self}::event_callback_task",
+        )
+        self._audio_queue = asyncio.Queue(maxsize=AUDIO_QUEUE_MAXSIZE)
+        self._audio_task = self._task_manager.create_task(
+            self._sdk_cb_to_loop_task_handler(self._audio_queue),
+            f"{self}::audio_callback_task",
+        )
+        self._video_queue = asyncio.Queue(maxsize=VIDEO_QUEUE_MAXSIZE)
+        self._video_task = self._task_manager.create_task(
+            self._sdk_cb_to_loop_task_handler(self._video_queue),
+            f"{self}::video_callback_task",
+        )
+
+    async def cleanup(self) -> None:
+        """Cleanup the client, disconnecting if necessary."""
+        if self._connected:
+            await self.disconnect()
+
+        if self._event_task and self._task_manager:
+            await self._task_manager.cancel_task(self._event_task)
+            await self._event_task
+            self._event_task = None
+        if self._audio_task and self._task_manager:
+            await self._task_manager.cancel_task(self._audio_task)
+            await self._audio_task
+            self._audio_task = None
+        if self._video_task and self._task_manager:
+            await self._task_manager.cancel_task(self._video_task)
+            await self._video_task
+            self._video_task = None
 
     def add_listener(self, listener: VonageClientListener) -> int:
         """Add a listener to the Vonage client.
@@ -223,74 +258,59 @@ class VonageClient:
         """Connect to the Vonage session."""
         logger.info(f"Connecting with session string {self._session_id}")
 
+        if self._disconnecting_future is not None:
+            logger.info(
+                f"Waiting for disconnection to complete before connecting to {self._session_id}"
+            )
+            await self._disconnecting_future
+
         if self._connected:
             logger.info(f"Already connected to {self._session_id}")
             self._connection_counter += 1
             return
 
-        if self._publish_ready is not None:
+        if self._connecting_future is not None:
             logger.info(f"Already connecting to {self._session_id}")
 
             # if we already connecting, await for the publish ready event
-            await self._publish_ready
+            await self._connecting_future
             self._connection_counter += 1
             return
 
-        loop = asyncio.get_running_loop()
-        self._loop = loop
+        # this future will allow concurrent calls to connect to wait until the first connect call is done
+        self._connecting_future = self._get_event_loop().create_future()
 
-        # when audio publishing is enabled we need to wait for the session to be ready for audio
-        # however, if only video is being published we don't need to wait
-        if self._publisher_settings.has_audio:
-            self._publish_ready = loop.create_future()
-
-        if not self._client.connect(
-            application_id=self._application_id,
-            session_id=self._session_id,
-            token=self._token,
-            session_settings=SessionSettings(
-                av=SessionAVSettings(
-                    audio_input=SessionAudioSettings(
-                        sample_rate=self._params.audio_out_sample_rate,
-                        number_of_channels=self._params.audio_out_channels,
-                    ),
-                    audio_output=SessionAudioSettings(
-                        sample_rate=self._params.audio_in_sample_rate,
-                        number_of_channels=self._params.audio_in_channels,
-                    ),
-                    video_input=SessionVideoInputSettings(
-                        resolution=VideoResolution(
-                            width=self._params.video_out_width, height=self._params.video_out_height
-                        ),
-                        fps=self._params.video_out_framerate,
-                        format=self.vonage_image_format(self._params.video_out_color_format),
-                    ),
-                ),
-                enable_migration=self._params.enable_migration,
-                logging=LoggingSettings(level="INFO"),
-            ),
-            on_error_cb=self._on_session_error_cb,
-            on_connected_cb=self._on_session_connected_cb,
-            on_disconnected_cb=self._on_session_disconnected_cb,
-            on_stream_received_cb=self._on_stream_received_cb,
-            on_stream_dropped_cb=self._on_stream_dropped_cb,
-            on_audio_data_cb=self._on_session_audio_data_cb,
-            on_ready_for_audio_cb=self._on_session_ready_for_audio_cb,
-        ):
-            logger.error(f"Could not connect to {self._session_id}")
-            raise VonageException("Could not connect to session")
+        try:
+            await asyncio.wait_for(
+                self._sdk_connect(), timeout=VIDEO_CONNECTOR_TIMEOUT.total_seconds()
+            )
+        except asyncio.TimeoutError as exc:
+            logger.error(f"Timeout connecting to Vonage session {self._session_id}")
+            future = self._connecting_future
+            self._connecting_future = None
+            future.cancel()
+            raise exc
 
         logger.info(f"Connected to {self._session_id}")
-
-        if self._publish_ready:
-            await self._publish_ready
-
         self._connected = True
         self._connection_counter += 1
-        await self._on_session_connected()
+
+        # all concurrent calls to connect can now proceed
+        future = self._connecting_future
+        self._connecting_future = None
+        future.set_result(None)
+
+        for listener in self._listeners.values():
+            await listener.on_connected(self._session)
 
     async def disconnect(self) -> None:
         """Disconnect from the Vonage session."""
+        if self._connecting_future is not None:
+            logger.info(
+                f"Waiting for connection to complete before disconnecting from {self._session_id}"
+            )
+            await self._connecting_future
+
         if not self._connected:
             logger.info(f"Already disconnected from {self._session_id}")
             return
@@ -302,16 +322,34 @@ class VonageClient:
             )
             return
 
+        self._disconnecting_future = self._get_event_loop().create_future()
+
         logger.info(f"Disconnecting from {self._session_id}")
 
-        if self._publisher:
-            self._client.unpublish()
-            self._publisher = None
+        # ensure we clear up any pending SDK callback events and media buffers
+        if self._event_queue:
+            self._clear_queue(self._event_queue)
+        self.clear_media_buffers()
 
-        self._client.disconnect()
-        self._connected = False
+        try:
+            await asyncio.wait_for(
+                self._sdk_disconnect(), timeout=VIDEO_CONNECTOR_TIMEOUT.total_seconds()
+            )
+        except asyncio.TimeoutError as exc:
+            logger.error(f"Timeout disconnecting from Vonage session {self._session_id}")
+            future = self._disconnecting_future
+            self._disconnecting_future = None
+            self._connection_counter += 1
+            future.cancel()
+            raise exc
 
         logger.info(f"Disconnected from {self._session_id}")
+
+        self._connected = False
+
+        future = self._disconnecting_future
+        self._disconnecting_future = None
+        future.set_result(None)
 
         for listener in self._listeners.values():
             await listener.on_disconnected(self._session)
@@ -319,21 +357,30 @@ class VonageClient:
     def clear_media_buffers(self) -> None:
         """Clear output media buffers in the Vonage session."""
         logger.debug(f"Clearing media buffers {self._session_id}")
+        if self._audio_queue:
+            self._clear_queue(self._audio_queue)
+        if self._video_queue:
+            self._clear_queue(self._video_queue)
         self._client.clear_media_buffers()
 
-    async def write_audio(self, raw_audio_frame: bytes) -> bool:
+    async def write_audio(self, audio_frame: OutputAudioRawFrame) -> bool:
         """Write audio data to the Vonage session.
 
         Args:
-            raw_audio_frame: Raw PCM audio data to inject into the session.
+            audio_frame: Audio frame to write
         """
-        frame_count = len(raw_audio_frame) // (self._params.audio_out_channels * 2)
+        target_audio_props = AudioProps(
+            sample_rate=self._audio_out_sample_rate,
+            is_stereo=self._params.audio_out_channels == 2,
+        )
+        proc_audio_frame = await self._process_audio_if_needed(audio_frame, target_audio_props)
+
         return self._client.add_audio(
             AudioData(
-                sample_buffer=memoryview(raw_audio_frame).cast("h"),
-                number_of_frames=frame_count,
+                sample_buffer=memoryview(proc_audio_frame.audio).cast("h"),
+                number_of_frames=proc_audio_frame.num_frames,
                 number_of_channels=self._params.audio_out_channels,
-                sample_rate=self._params.audio_out_sample_rate,
+                sample_rate=self._audio_out_sample_rate,
             )
         )
 
@@ -353,14 +400,20 @@ class VonageClient:
         Args:
             frame: The output video frame to write.
         """
-        # convert RGB to BGR
-        np_rgb = np.frombuffer(frame.image, dtype=np.uint8)
-        np_bgr = np_rgb.reshape(frame.size[1], frame.size[0], 3)[:, :, ::-1]
-        bgr_bytes = np_bgr.tobytes()
+        if not self._check_image_data(frame):
+            return False
+
+        video_bytes = frame.image
+        # convert RGB to BGR, as Vonage SDK expects BGR format for RGB input
+        if frame.format == "RGB":
+            np_rgb = np.frombuffer(frame.image, dtype=np.uint8)
+            np_bgr = np_rgb.reshape(frame.size[1], frame.size[0], 3)[:, :, ::-1]
+            bgr_bytes = np_bgr.tobytes()
+            video_bytes = bgr_bytes
 
         return self._client.add_video(
             VideoFrame(
-                frame_buffer=memoryview(bgr_bytes).cast("B"),
+                frame_buffer=memoryview(video_bytes).cast("B"),
                 resolution=VideoResolution(width=frame.size[0], height=frame.size[1]),
                 format=self.vonage_image_format(
                     frame.format or self._params.video_out_color_format
@@ -368,138 +421,342 @@ class VonageClient:
             )
         )
 
-    async def _on_session_connected(self) -> None:
-        for listener in self._listeners.values():
-            await listener.on_connected(self._session)
+    def _check_image_data(self, frame: OutputImageRawFrame) -> bool:
+        """Check the image data for validity.
 
-    def _on_session_ready_for_audio_cb(self, session: Session) -> None:
-        logger.info(f"Session {session.id} ready to publish")
-        if self._publish_ready:
-            future = self._publish_ready
-            self._publish_ready = None
-            self._call_soon_threadsafe(lambda: future.set_result(None))
+        Args:
+            frame: The OutputImageRawFrame to check.
+        """
+        res = True
+        if frame.format != self._params.video_out_color_format:
+            logger.error(
+                f"Expected color format {self._params.video_out_color_format}, got {frame.format}"
+            )
+            res = False
+        if (
+            frame.size[0] != self._params.video_out_width
+            or frame.size[1] != self._params.video_out_height
+        ):
+            logger.error(
+                f"Expected resolution {self._params.video_out_width}x{self._params.video_out_height}, "
+                f"got {frame.size[0]}x{frame.size[1]}"
+            )
+            res = False
+        return res
 
-    def _call_soon_threadsafe(self, callback: Callable[[], Any]) -> None:
-        if self._loop:
-            self._loop.call_soon_threadsafe(callback)
+    async def _sdk_connect(self) -> None:
+        # this future will be set when the session is ready to publish, audio needs a special callback before
+        # publishing
+        ready_to_publish_future = self._get_event_loop().create_future()
+
+        # this callback will be called when the session is ready to publish audio, video-only doesn't need it
+        def audio_ready_cb(session: Session) -> None:
+            async def async_cb() -> None:
+                logger.info(f"Session {session.id} ready to publish")
+                ready_to_publish_future.set_result(None)
+
+            self._sdk_event_cb_to_loop(async_cb())
+
+        def connect_proc() -> None:
+            if not self._client.connect(
+                application_id=self._application_id,
+                session_id=self._session_id,
+                token=self._token,
+                session_settings=SessionSettings(
+                    av=SessionAVSettings(
+                        audio_input=SessionAudioSettings(
+                            sample_rate=self._audio_out_sample_rate,
+                            number_of_channels=self._params.audio_out_channels,
+                        ),
+                        audio_output=SessionAudioSettings(
+                            sample_rate=self._audio_in_sample_rate,
+                            number_of_channels=self._params.audio_in_channels,
+                        ),
+                        video_input=SessionVideoInputSettings(
+                            resolution=VideoResolution(
+                                width=self._params.video_out_width,
+                                height=self._params.video_out_height,
+                            ),
+                            fps=self._params.video_out_framerate,
+                            format=self.vonage_image_format(self._params.video_out_color_format),
+                        ),
+                    ),
+                    enable_migration=self._params.session_enable_migration,
+                    logging=LoggingSettings(level="INFO"),
+                ),
+                on_error_cb=self._on_session_error_cb,
+                on_connected_cb=self._on_session_connected_cb,
+                on_disconnected_cb=self._on_session_disconnected_cb,
+                on_stream_received_cb=self._on_stream_received_cb,
+                on_stream_dropped_cb=self._on_stream_dropped_cb,
+                on_audio_data_cb=self._on_session_audio_data_cb,
+                on_ready_for_audio_cb=audio_ready_cb,
+            ):
+                logger.error(f"Could not connect to {self._session_id}")
+                raise VonageException("Could not connect to session")
+
+        await self._get_event_loop().run_in_executor(self._executor, connect_proc)
+
+        # when audio publishing is enabled we need to wait for the session to be ready for audio
+        # however, if only video is being published at this point we don't need to wait anymore
+        if self._params.audio_out_enabled:
+            logger.info(f"Waiting for {self._session_id} to be ready to publish audio")
+            await ready_to_publish_future
+
+    async def _sdk_disconnect(self) -> None:
+        def disconnect_proc() -> None:
+            if self._publisher:
+                self._client.unpublish()
+                self._publisher = None
+            self._client.disconnect()
+
+        await self._get_event_loop().run_in_executor(self._executor, disconnect_proc)
+
+    @staticmethod
+    def _clear_queue(queue: asyncio.Queue[SimpleCoroutine]) -> None:
+        """Clear all items from the given asyncio queue."""
+        try:
+            while True:
+                item = queue.get_nowait()
+                # Close coroutines to avoid "never awaited" warnings
+                item.close()
+                queue.task_done()
+        except asyncio.QueueEmpty:
+            pass
+
+    def _get_event_loop(self) -> asyncio.AbstractEventLoop:
+        """Get the event loop from the task manager."""
+        if not self._task_manager:
+            raise Exception(f"{self}: missing task manager (pipeline not started?)")
+        return self._task_manager.get_event_loop()
+
+    async def _sdk_cb_to_loop_task_handler(self, queue: asyncio.Queue[SimpleCoroutine]) -> None:
+        """Read coroutines generated from SDK callbacks in the given queue executing them in the event loop."""
+        # ensure we know the thread id of the event loop
+        self._loop_thread_id = threading.get_ident()
+        try:
+            while True:
+                async_task = await queue.get()
+                await async_task
+                queue.task_done()
+        except asyncio.CancelledError:
+            pass
+
+    def _sdk_event_cb_to_loop(self, callback: SimpleCoroutine) -> None:
+        """From an SDK thread queue an event coroutine to be asynchronously executed in the task manager event loop."""
+        self._sdk_cb_to_loop("event", self._event_queue, callback)
+
+    def _sdk_audio_cb_to_loop(self, callback: SimpleCoroutine) -> None:
+        """From an SDK thread queue an audio coroutine to be asynchronously executed in the task manager event loop."""
+        self._sdk_cb_to_loop("audio", self._audio_queue, callback)
+
+    def _sdk_video_cb_to_loop(self, callback: SimpleCoroutine) -> None:
+        """From an SDK thread queue a video coroutine to be asynchronously executed in the task manager event loop."""
+        self._sdk_cb_to_loop("video", self._video_queue, callback)
+
+    def _sdk_cb_to_loop(
+        self,
+        queue_type_name: str,
+        queue: Optional[asyncio.Queue[SimpleCoroutine]],
+        async_task: SimpleCoroutine,
+    ) -> None:
+        """From an SDK thread queue a coroutine to be asynchronously executed in the task manager event loop.
+
+        If the coroutine queue is full the event will be dropped and a warning logged.
+        """
+        if not queue:
+            raise Exception(f"missing {queue_type_name} queue (pipeline not started?)")
+
+        def put_coroutine() -> None:
+            try:
+                queue.put_nowait(async_task)
+            except asyncio.QueueFull:
+                logger.warning(
+                    f"{queue_type_name} queue is full, dropping SDK {queue_type_name} callback."
+                )
+                async_task.close()
+
+        if threading.get_ident() == self._loop_thread_id:
+            put_coroutine()
+        else:
+            self._get_event_loop().call_soon_threadsafe(put_coroutine)
 
     def _on_session_error_cb(self, session: Session, description: str, code: int) -> None:
-        logger.warning(f"Session error {session.id} code={code} description={description}")
-        self._call_soon_threadsafe(
-            lambda: asyncio.create_task(self._on_session_error_async_cb(session, description, code))
-        )
+        async def async_cb() -> None:
+            logger.warning(f"Session error {session.id} code={code} description={description}")
+            for listener in self._listeners.values():
+                await listener.on_error(session, description, code)
 
-    async def _on_session_error_async_cb(
-        self, session: Session, description: str, code: int
-    ) -> None:
-        for listener in self._listeners.values():
-            await listener.on_error(session, description, code)
+        self._sdk_event_cb_to_loop(async_cb())
 
     def _on_session_connected_cb(self, session: Session) -> None:
-        logger.info(f"Session connected {session.id}")
-        self._session = session
-        if self._publisher_settings.has_audio or self._publisher_settings.has_video:
-            logger.info(
-                f"Publishing audio={self._publisher_settings.has_audio} video={self._publisher_settings.has_video} for session {session.id}"
-            )
-            self._client.publish(
-                settings=PublisherSettings(
-                    name=self._publisher_settings.name,
-                    audio_settings=PublisherAudioSettings(
-                        enable_stereo_mode=self._publisher_settings.enable_stereo_mode,
-                        enable_opus_dtx=self._publisher_settings.enable_opus_dtx,
+        async def async_cb() -> None:
+            logger.info(f"Session connected {session.id}")
+            self._session = session
+            if self._params.audio_out_enabled or self._params.video_out_enabled:
+                logger.info(
+                    f"Publishing audio={self._params.audio_out_enabled} video={self._params.video_out_enabled} "
+                    f"for session {session.id}"
+                )
+                # TODO this could be run in the executor pool as it blocks
+                self._client.publish(
+                    settings=PublisherSettings(
+                        name=self._params.publisher_name,
+                        audio_settings=PublisherAudioSettings(
+                            enable_stereo_mode=self._params.audio_out_channels == 2,
+                            enable_opus_dtx=self._params.publisher_enable_opus_dtx,
+                        ),
+                        has_audio=self._params.audio_out_enabled,
+                        has_video=self._params.video_out_enabled,
                     ),
-                    has_audio=self._publisher_settings.has_audio,
-                    has_video=self._publisher_settings.has_video,
-                ),
-                on_error_cb=self._on_publisher_error_cb,
-                on_stream_created_cb=self._on_publisher_stream_created_cb,
-                on_stream_destroyed_cb=self._on_publisher_stream_destroyed_cb,
-            )
-        else:
-            logger.info(f"No audio or video to publish for session {session.id}")
+                    on_error_cb=self._on_publisher_error_cb,
+                    on_stream_created_cb=self._on_publisher_stream_created_cb,
+                    on_stream_destroyed_cb=self._on_publisher_stream_destroyed_cb,
+                )
+            else:
+                logger.info(f"No audio or video to publish for session {session.id}")
+
+        self._sdk_event_cb_to_loop(async_cb())
 
     def _on_session_disconnected_cb(self, session: Session) -> None:
-        logger.info(f"Session disconnected {session.id}")
-        self._connected = False
+        async def async_cb() -> None:
+            logger.info(f"Session disconnected {session.id}")
+            self._connected = False
+
+        self._sdk_event_cb_to_loop(async_cb())
 
     def _on_publisher_error_cb(self, publisher: Publisher, description: str, code: int) -> None:
-        logger.warning(
-            f"Publisher error session={self._session_id} publisher={publisher.stream.id} "
-            f"code={code} description={description}"
-        )
+        async def async_cb() -> None:
+            logger.warning(
+                f"Publisher error session={self._session_id} publisher={publisher.stream.id} "
+                f"code={code} description={description}"
+            )
+
+        self._sdk_event_cb_to_loop(async_cb())
 
     def _on_publisher_stream_created_cb(self, publisher: Publisher) -> None:
-        logger.info(
-            f"Publisher stream created session={self._session_id} publisher={publisher.stream.id}"
-        )
-        self._publisher = publisher
+        async def async_cb() -> None:
+            logger.info(
+                f"Publisher stream created session={self._session_id} publisher={publisher.stream.id}"
+            )
+            self._publisher = publisher
+
+        self._sdk_event_cb_to_loop(async_cb())
 
     def _on_publisher_stream_destroyed_cb(self, publisher: Publisher) -> None:
-        logger.info(
-            f"Publisher stream destroyed session={self._session_id} publisher={publisher.stream.id}"
-        )
+        async def async_cb() -> None:
+            logger.info(
+                f"Publisher stream destroyed session={self._session_id} publisher={publisher.stream.id}"
+            )
+
+        self._sdk_event_cb_to_loop(async_cb())
 
     def _on_session_audio_data_cb(self, session: Session, audio_data: AudioData) -> None:
-        for listener in self._listeners.values():
-            listener.on_audio_in(session, audio_data)
+        """Callback for incoming mixed audio data for all the subscribers in the session."""
+        # we need to keep a copy of the audio data as it is a memory view and it will be lost when processed async later
+        audio_frame = InputAudioRawFrame(
+            audio=audio_data.sample_buffer.tobytes(),
+            sample_rate=audio_data.sample_rate,
+            num_channels=audio_data.number_of_channels,
+        )
+
+        async def async_cb() -> None:
+            target_audio_props = AudioProps(
+                sample_rate=self._audio_in_sample_rate,
+                is_stereo=self._params.audio_in_channels == 2,
+            )
+            proc_audio_frame = await self._process_audio_if_needed(audio_frame, target_audio_props)
+
+            for listener in self._listeners.values():
+                await listener.on_audio_in(session, proc_audio_frame)
+
+        self._sdk_audio_cb_to_loop(async_cb())
 
     def _on_stream_received_cb(self, session: Session, stream: Stream) -> None:
-        logger.info(f"Stream received session={session.id} stream={stream.id}")
-        self._client.subscribe(
-            stream,
-            on_error_cb=self._on_subscriber_error_cb,
-            on_connected_cb=self._on_subscriber_connected_cb,
-            on_disconnected_cb=self._on_subscriber_disconnected_cb,
-        )
-        self._call_soon_threadsafe(
-            lambda: asyncio.create_task(self._on_stream_received_async_cb(session, stream))
-        )
+        async def async_cb() -> None:
+            logger.info(f"Stream received session={session.id} stream={stream.id}")
 
-    async def _on_stream_received_async_cb(self, session: Session, stream: Stream) -> None:
-        for listener in self._listeners.values():
-            await listener.on_stream_received(session, stream)
+            for listener in self._listeners.values():
+                await listener.on_stream_received(session, stream)
+
+            if self._params.audio_in_enabled:
+                # subscribe to the stream after raising the event, in this way we allow the user to subscribe to video
+                # if the subscribe is performed in the callback the following call will fail gracefully
+                # (we only allow one subscribe per stream)
+                # TODO this could be run in the executor pool as it blocks
+                self._client.subscribe(
+                    stream,
+                    on_error_cb=self._on_subscriber_error_cb,
+                    on_connected_cb=self._on_subscriber_connected_cb,
+                    on_disconnected_cb=self._on_subscriber_disconnected_cb,
+                )
+
+        self._sdk_event_cb_to_loop(async_cb())
 
     def _on_stream_dropped_cb(self, session: Session, stream: Stream) -> None:
-        logger.info(f"Stream dropped session={session.id} stream={stream.id}")
-        self._client.unsubscribe(stream)
-        self._call_soon_threadsafe(
-            lambda: asyncio.create_task(self._on_stream_dropped_async_cb(session, stream))
-        )
+        async def async_cb() -> None:
+            logger.info(f"Stream dropped session={session.id} stream={stream.id}")
+            self._client.unsubscribe(stream)
 
-    async def _on_stream_dropped_async_cb(self, session: Session, stream: Stream) -> None:
-        for listener in self._listeners.values():
-            await listener.on_stream_dropped(session, stream)
+            for listener in self._listeners.values():
+                await listener.on_stream_dropped(session, stream)
+
+        self._sdk_event_cb_to_loop(async_cb())
 
     def _on_subscriber_error_cb(self, subscriber: Subscriber, description: str, code: int) -> None:
-        logger.info(
-            f"Subscriber error session={self._session_id} subscriber={subscriber.stream.id} "
-            f"code={code} description={description}"
-        )
+        async def async_cb() -> None:
+            logger.info(
+                f"Subscriber error session={self._session_id} subscriber={subscriber.stream.id} "
+                f"code={code} description={description}"
+            )
+
+        self._sdk_event_cb_to_loop(async_cb())
 
     def _on_subscriber_connected_cb(self, subscriber: Subscriber) -> None:
-        logger.info(
-            f"Subscriber connected session={self._session_id} subscriber={subscriber.stream.id} "
-        )
-        self._call_soon_threadsafe(
-            lambda: asyncio.create_task(self._on_subscriber_connected_async_cb(subscriber))
-        )
+        async def async_cb() -> None:
+            logger.info(
+                f"Subscriber connected session={self._session_id} subscriber={subscriber.stream.id} "
+            )
+            for listener in self._listeners.values():
+                await listener.on_subscriber_connected(subscriber)
 
-    async def _on_subscriber_connected_async_cb(self, subscriber: Subscriber) -> None:
-        for listener in self._listeners.values():
-            await listener.on_subscriber_connected(subscriber)
+        self._sdk_event_cb_to_loop(async_cb())
 
     def _on_subscriber_disconnected_cb(self, subscriber: Subscriber) -> None:
-        logger.info(
-            f"Subscriber disconnected session={self._session_id} subscriber={subscriber.stream.id} "
-        )
-        self._call_soon_threadsafe(
-            lambda: asyncio.create_task(self._on_subscriber_disconnected_async_cb(subscriber))
-        )
+        async def async_cb() -> None:
+            logger.info(
+                f"Subscriber disconnected session={self._session_id} subscriber={subscriber.stream.id} "
+            )
+            for listener in self._listeners.values():
+                await listener.on_subscriber_disconnected(subscriber)
 
-    async def _on_subscriber_disconnected_async_cb(self, subscriber: Subscriber) -> None:
-        for listener in self._listeners.values():
-            await listener.on_subscriber_disconnected(subscriber)
+        self._sdk_event_cb_to_loop(async_cb())
+
+    async def _process_audio_if_needed(self, audio_frame: T, target_props: AudioProps) -> T:
+        check_audio_data(audio_frame.audio, audio_frame.num_frames, audio_frame.num_channels)
+
+        current_audio_props = AudioProps(
+            sample_rate=audio_frame.sample_rate,
+            is_stereo=audio_frame.num_channels == 2,
+        )
+        if current_audio_props != target_props:
+            audio_np = np.frombuffer(audio_frame.audio, dtype=np.int16)
+            processed_audio_np = await process_audio(
+                self._resampler,
+                audio_np,
+                current_audio_props,
+                target_props,
+            )
+
+            processed_audio_frame = replace(
+                audio_frame,
+                audio=processed_audio_np.tobytes(),
+                sample_rate=target_props.sample_rate,
+                num_channels=2 if target_props.is_stereo else 1,
+            )
+            return processed_audio_frame
+        else:
+            return audio_frame
 
 
 class VonageVideoWebrtcInputTransport(BaseInputTransport):
@@ -521,7 +778,6 @@ class VonageVideoWebrtcInputTransport(BaseInputTransport):
         self._initialized: bool = False
         self._client: VonageClient = client
         self._listener_id: int = -1
-        self._resampler = create_stream_resampler()
         self._connected: bool = False
 
     async def start(self, frame: StartFrame) -> None:
@@ -546,40 +802,23 @@ class VonageVideoWebrtcInputTransport(BaseInputTransport):
 
         await self.set_transport_ready(frame)
 
-    def _audio_in_cb(self, _session: Session, audio: AudioData) -> None:
+    async def setup(self, setup: FrameProcessorSetup) -> None:
+        """Set up the processor with required components.
+
+        Args:
+            setup: Configuration object containing setup parameters.
+        """
+        await super().setup(setup)
+        await self._client.setup(setup)
+
+    async def cleanup(self) -> None:
+        """Cleanup input transport."""
+        await super().cleanup()  # type: ignore
+        await self._client.cleanup()
+
+    async def _audio_in_cb(self, _session: Session, audio: InputAudioRawFrame) -> None:
         if self._connected and self._params.audio_in_enabled:
-            check_audio_data(audio.sample_buffer, audio.number_of_frames, audio.number_of_channels)
-
-            audio_sample_rate = audio.sample_rate
-            number_of_channels = audio.number_of_channels
-
-            # we need to copy the raw audio here as it is a memory view and it will be lost when processed async later
-            audio_np = np.frombuffer(audio.sample_buffer, dtype=np.int16)
-
-            async def push_frame() -> None:
-                # TODO(Toni S): this normalization won't be necessary once VIDMP-1393 is done
-                processed_audio_np = await process_audio(
-                    self._resampler,
-                    audio_np,
-                    AudioProps(
-                        sample_rate=audio_sample_rate,
-                        is_stereo=number_of_channels == 2,
-                    ),
-                    AudioProps(
-                        sample_rate=self.sample_rate,
-                        is_stereo=self._params.audio_in_channels == 2,
-                    ),
-                )
-
-                frame = InputAudioRawFrame(
-                    audio=processed_audio_np.tobytes(),
-                    sample_rate=self.sample_rate,
-                    num_channels=self._params.audio_in_channels,
-                )
-
-                await self.push_audio_frame(frame)
-
-            asyncio.run_coroutine_threadsafe(push_frame(), self.get_event_loop())
+            await self.push_audio_frame(audio)
 
     async def stop(self, frame: EndFrame) -> None:
         """Stop the Vonage input transport.
@@ -623,7 +862,6 @@ class VonageVideoWebrtcOutputTransport(BaseOutputTransport):
         """
         super().__init__(params)
         self._initialized: bool = False
-        self._resampler = create_stream_resampler()
         self._client = client
         self._connected: bool = False
 
@@ -645,6 +883,20 @@ class VonageVideoWebrtcOutputTransport(BaseOutputTransport):
             self._connected = True
 
         await self.set_transport_ready(frame)
+
+    async def setup(self, setup: FrameProcessorSetup) -> None:
+        """Set up the processor with required components.
+
+        Args:
+            setup: Configuration object containing setup parameters.
+        """
+        await super().setup(setup)
+        await self._client.setup(setup)
+
+    async def cleanup(self) -> None:
+        """Cleanup output transport."""
+        await super().cleanup()  # type: ignore
+        await self._client.cleanup()
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         """Process a frame for the Vonage output transport.
@@ -668,27 +920,7 @@ class VonageVideoWebrtcOutputTransport(BaseOutputTransport):
         """
         result = False
         if self._connected and self._params.audio_out_enabled:
-            check_audio_data(frame.audio, frame.num_frames, frame.num_channels)
-
-            audio = frame.audio
-            params: VonageClientParams = self._client.get_params()
-            np_audio = np.frombuffer(audio, dtype=np.int16)
-
-            # TODO(Toni S): this normalization won't be necessary once VIDMP-1393 is done
-            processed_audio = await process_audio(
-                self._resampler,
-                np_audio,
-                AudioProps(
-                    sample_rate=frame.sample_rate,
-                    is_stereo=frame.num_channels == 2,
-                ),
-                AudioProps(
-                    sample_rate=params.audio_out_sample_rate,
-                    is_stereo=params.audio_out_channels == 2,
-                ),
-            )
-
-            result = await self._client.write_audio(processed_audio.tobytes())
+            result = await self._client.write_audio(frame)
 
         return result
 
@@ -699,33 +931,10 @@ class VonageVideoWebrtcOutputTransport(BaseOutputTransport):
             frame: The output video frame to write.
         """
         result = False
-        if self._connected and self._params.video_out_enabled and self.check_image_data(frame):
+        if self._connected and self._params.video_out_enabled:
             result = await self._client.write_video(frame)
 
         return result
-
-    def check_image_data(self, frame: OutputImageRawFrame) -> bool:
-        """Check the image data for validity.
-
-        Args:
-            frame: The OutputImageRawFrame to check.
-        """
-        res = True
-        if frame.format != self._params.video_out_color_format:
-            logger.error(
-                f"Expected color format {self._params.video_out_color_format}, got {frame.format}"
-            )
-            res = False
-        if (
-            frame.size[0] != self._params.video_out_width
-            or frame.size[1] != self._params.video_out_height
-        ):
-            logger.error(
-                f"Expected resolution {self._params.video_out_width}x{self._params.video_out_height}, "
-                f"got {frame.size[0]}x{frame.size[1]}"
-            )
-            res = False
-        return res
 
     async def stop(self, frame: EndFrame) -> None:
         """Stop the Vonage output transport.
@@ -782,30 +991,9 @@ class VonageVideoWebrtcTransport(BaseTransport):
             params: Transport parameters for input/output configuration.
         """
         super().__init__()
-        params.audio_out_sample_rate = params.audio_out_sample_rate or 48000
         self._params = params
 
-        vonage_params = VonageClientParams(
-            audio_in_sample_rate=params.audio_in_sample_rate or 48000,
-            audio_in_channels=params.audio_in_channels,
-            audio_out_sample_rate=params.audio_out_sample_rate,
-            audio_out_channels=params.audio_out_channels,
-            enable_migration=params.session_enable_migration,
-            video_out_width=params.video_out_width,
-            video_out_height=params.video_out_height,
-            video_out_framerate=params.video_out_framerate,
-            video_out_color_format=params.video_out_color_format,
-        )
-        publisher_settings = VonagePublisherSettings(
-            name=params.publisher_name,
-            enable_stereo_mode=params.audio_out_channels == 2,
-            enable_opus_dtx=params.publisher_enable_opus_dtx,
-            has_audio=params.audio_out_enabled,
-            has_video=params.video_out_enabled,
-        )
-        self._client = VonageClient(
-            application_id, session_id, token, vonage_params, publisher_settings
-        )
+        self._client = VonageClient(application_id, session_id, token, params)
 
         # Register supported handlers.
         self._register_event_handler("on_joined")
@@ -944,19 +1132,6 @@ def check_audio_data(
         raise ValueError(f"We only accept 16 bit PCM audio, got {bytes_per_sample * 8} bit")
 
 
-@dataclass
-class AudioProps:
-    """Audio properties for normalization.
-
-    Parameters:
-        sample_rate: The sample rate of the audio.
-        is_stereo: Whether the audio is stereo (True) or mono (False).
-    """
-
-    sample_rate: int
-    is_stereo: bool
-
-
 def process_audio_channels(
     audio: npt.NDArray[np.int16], current: AudioProps, target: AudioProps
 ) -> npt.NDArray[np.int16]:
@@ -982,7 +1157,6 @@ async def process_audio(
         # first normalize channels to mono if needed, then resample, then normalize channels to target
         res_audio = process_audio_channels(res_audio, current, replace(current, is_stereo=False))
         current = replace(current, is_stereo=False)
-
         res_audio_bytes: bytes = await resampler.resample(
             res_audio.tobytes(), current.sample_rate, target.sample_rate
         )
