@@ -6,8 +6,8 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import timedelta
-from typing import Any, Callable, Optional
+from datetime import datetime, timedelta
+from typing import Any, Awaitable, Callable, Optional
 from unittest.mock import ANY, AsyncMock, MagicMock, Mock, call, patch
 
 import numpy as np
@@ -22,6 +22,7 @@ from pipecat.frames.frames import (
     OutputAudioRawFrame,
     OutputImageRawFrame,
     StartFrame,
+    UserImageRawFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessorSetup
 from pipecat.utils.asyncio.task_manager import TaskManager, TaskManagerParams
@@ -33,38 +34,45 @@ vonage_video_mock.models = MagicMock()
 
 
 # Create mock classes that match the expected interface
+
+
+@dataclass(eq=True, frozen=True)
 class MockAudioData:
-    def __init__(
-        self,
-        sample_buffer: memoryview,
-        number_of_frames: int,
-        number_of_channels: int,
-        sample_rate: int,
-    ):
-        self.sample_buffer = sample_buffer
-        self.number_of_frames = number_of_frames
-        self.number_of_channels = number_of_channels
-        self.sample_rate = sample_rate
+    sample_buffer: memoryview
+    sample_rate: int
+    number_of_channels: int
+    number_of_frames: int
 
 
+@dataclass(eq=True, frozen=True)
 class MockSession:
-    def __init__(self, id: str = "test_session"):
-        self.id = id
+    id: str
 
 
+@dataclass(eq=True, frozen=True)
+class MockConnection:
+    id: str
+    creation_time: datetime
+    data: str = ""
+
+
+DUMMY_CONNECTION = MockConnection(id="dummy", creation_time=datetime.min)
+
+
+@dataclass(eq=True, frozen=True)
 class MockStream:
-    def __init__(self, id: str = "test_stream"):
-        self.id = id
+    id: str
+    connection: MockConnection
 
 
+@dataclass(eq=True, frozen=True)
 class MockPublisher:
-    def __init__(self, stream: Optional[MockStream] = None):
-        self.stream = stream or MockStream()
+    stream: MockStream
 
 
+@dataclass(eq=True, frozen=True)
 class MockSubscriber:
-    def __init__(self, stream: Optional[MockStream] = None):
-        self.stream = stream or MockStream()
+    stream: Optional[MockStream] = None
 
 
 @dataclass(eq=True, frozen=True)
@@ -75,34 +83,34 @@ class MockSessionAudioSettings:
 
 @dataclass(eq=True, frozen=True)
 class MockVideoResolution:
-    width: int = 1280
-    height: int = 720
+    width: int = 640
+    height: int = 480
 
 
 @dataclass(eq=True, frozen=True)
 class MockSessionVideoPublisherSettings:
-    resolution: MockVideoResolution = MockVideoResolution()
+    resolution: MockVideoResolution
     fps: int = 30
-    format: str = "YUV"
+    format: str = "YUV420P"
 
 
 @dataclass(eq=True, frozen=True)
 class MockSessionAVSettings:
-    audio_publisher: MockSessionAudioSettings = MockSessionAudioSettings()
-    audio_subscribers_mix: MockSessionAudioSettings = MockSessionAudioSettings()
-    video_publisher: MockSessionVideoPublisherSettings = MockSessionVideoPublisherSettings()
+    audio_publisher: Optional[MockSessionAudioSettings] = None
+    audio_subscribers_mix: Optional[MockSessionAudioSettings] = None
+    video_publisher: Optional[MockSessionVideoPublisherSettings] = None
 
 
 @dataclass(eq=True, frozen=True)
 class MockLoggingSettings:
-    level: str = "INFO"
+    level: str = "WARN"
 
 
 @dataclass(eq=True, frozen=True)
 class MockSessionSettings:
-    av: MockSessionAVSettings = MockSessionAVSettings()
     enable_migration: bool = False
-    logging: MockLoggingSettings = MockLoggingSettings()
+    av: Optional[MockSessionAVSettings] = None
+    logging: Optional[MockLoggingSettings] = None
 
 
 @dataclass(eq=True, frozen=True)
@@ -113,22 +121,36 @@ class MockPublisherAudioSettings:
 
 @dataclass(eq=True, frozen=True)
 class MockPublisherSettings:
-    name: str = ""
-    has_audio: bool = False
-    has_video: bool = False
-    audio_settings: MockPublisherAudioSettings = MockPublisherAudioSettings()
+    name: str
+    has_audio: bool
+    has_video: bool
+    audio_settings: Optional[MockPublisherAudioSettings] = None
 
 
 @dataclass(eq=True, frozen=True)
 class MockVideoFrame:
-    resolution: MockVideoResolution = MockVideoResolution()
-    format: str = "RGB24"
-    frame_buffer: bytes = b""
+    frame_buffer: memoryview
+    resolution: MockVideoResolution
+    format: str = "YUV420P"
+
+
+@dataclass(eq=True, frozen=True)
+class MockSubscriberVideoSettings:
+    preferred_resolution: Optional[MockVideoResolution] = None
+    preferred_framerate: Optional[int] = None
+
+
+@dataclass(eq=True, frozen=True)
+class MockSubscriberSettings:
+    subscribe_to_audio: bool = True
+    subscribe_to_video: bool = True
+    video_settings: Optional[MockSubscriberVideoSettings] = None
 
 
 # Set up the mock module structure
 vonage_video_mock.models.AudioData = MockAudioData
 vonage_video_mock.models.Session = MockSession
+vonage_video_mock.models.Connection = MockConnection
 vonage_video_mock.models.Stream = MockStream
 vonage_video_mock.models.Publisher = MockPublisher
 vonage_video_mock.models.Subscriber = MockSubscriber
@@ -139,6 +161,8 @@ vonage_video_mock.models.SessionAudioSettings = MockSessionAudioSettings
 vonage_video_mock.models.PublisherAudioSettings = MockPublisherAudioSettings
 vonage_video_mock.models.PublisherSettings = MockPublisherSettings
 vonage_video_mock.models.SessionVideoPublisherSettings = MockSessionVideoPublisherSettings
+vonage_video_mock.models.SubscriberSettings = MockSubscriberSettings
+vonage_video_mock.models.SubscriberVideoSettings = MockSubscriberVideoSettings
 vonage_video_mock.models.VideoResolution = MockVideoResolution
 vonage_video_mock.models.VideoFrame = MockVideoFrame
 
@@ -146,12 +170,13 @@ vonage_video_mock.models.VideoFrame = MockVideoFrame
 sys.modules["vonage_video_connector"] = vonage_video_mock
 sys.modules["vonage_video_connector.models"] = vonage_video_mock.models
 
-
 # Now we can import the transport classes since the vonage_video module is mocked
 from pipecat.transports.vonage.video_webrtc import (
     AudioProps,
+    SubscribeSettings,
     VonageClient,
     VonageClientListener,
+    VonageException,
     VonageVideoWebrtcInputTransport,
     VonageVideoWebrtcOutputTransport,
     VonageVideoWebrtcTransport,
@@ -160,6 +185,14 @@ from pipecat.transports.vonage.video_webrtc import (
     process_audio,
     process_audio_channels,
 )
+
+
+@dataclass(frozen=True)
+class SubscriberCallbacks:
+    on_error_cb: Callable[[MockSubscriber, str, int], None]
+    on_connected_cb: Callable[[MockSubscriber], None]
+    on_disconnected_cb: Callable[[MockSubscriber], None]
+    on_render_frame_cb: Callable[[MockSubscriber, MockVideoFrame], None]
 
 
 class TestVonageVideoWebrtcTransport:
@@ -184,6 +217,9 @@ class TestVonageVideoWebrtcTransport:
         self.token = "test-token"
         self._frame_processor_setup: Optional[FrameProcessorSetup] = None
         self._executor = ThreadPoolExecutor(max_workers=1)
+
+        # subscriber state
+        self._subscriber_callbacks: dict[str, SubscriberCallbacks] = {}
 
     def _get_frame_processor_setup(self) -> FrameProcessorSetup:
         if self._frame_processor_setup is not None:
@@ -244,7 +280,7 @@ class TestVonageVideoWebrtcTransport:
         # Reset the mock for this specific test
         vonage_video_mock.VonageVideoClient.reset_mock()
 
-        params = self.VonageVideoWebrtcTransportParams()
+        params = self.VonageVideoWebrtcTransportParams(audio_in_enabled=True)
         client = self.VonageClient(self.application_id, self.session_id, self.token, params)
 
         assert client._application_id == self.application_id
@@ -294,10 +330,44 @@ class TestVonageVideoWebrtcTransport:
             *_: Any, on_ready_for_audio_cb: Optional[Callable[[Any], None]] = None, **__: Any
         ) -> bool:
             assert on_ready_for_audio_cb is not None
-            on_ready_for_audio_cb(vonage_video_mock.models.Session())
+            on_ready_for_audio_cb(vonage_video_mock.models.Session(id="session"))
             return True
 
         self.mock_client_instance.connect = MagicMock(side_effect=connect_side_effect)
+
+    def _setup_subscriber_callbacks(self, client: VonageClient) -> None:
+        def subscribe_side_effect(
+            stream: MockStream,
+            on_error_cb: Callable[[MockSubscriber, str, int], None],
+            on_connected_cb: Callable[[MockSubscriber], None],
+            on_disconnected_cb: Callable[[MockSubscriber], None],
+            on_render_frame_cb: Callable[[MockSubscriber, MockVideoFrame], None],
+            **__: Any,
+        ) -> bool:
+            self._subscriber_callbacks[stream.id] = SubscriberCallbacks(
+                on_error_cb=on_error_cb,
+                on_connected_cb=on_connected_cb,
+                on_disconnected_cb=on_disconnected_cb,
+                on_render_frame_cb=on_render_frame_cb,
+            )
+            return True
+
+        self.mock_client_instance.subscribe = MagicMock(side_effect=subscribe_side_effect)
+
+    async def _subscribe_n_handle_callbacks(
+        self,
+        client: VonageClient,
+        stream_id: str,
+        params: SubscribeSettings,
+        callback: Callable[[SubscriberCallbacks], None],
+    ) -> None:
+        task = asyncio.create_task(client.subscribe_to_stream(stream_id, params))
+        await self._wait_for_condition(
+            lambda: stream_id in self._subscriber_callbacks,
+            timeout=timedelta(seconds=2),
+        )
+        callback(self._subscriber_callbacks[stream_id])
+        await task
 
     async def _create_client(
         self,
@@ -311,6 +381,8 @@ class TestVonageVideoWebrtcTransport:
                 self._setup_audio_ready_callback(client)
             else:
                 self.mock_client_instance.connect.return_value = True
+
+        self._setup_subscriber_callbacks(client)
 
         await client.setup(self._get_frame_processor_setup())
 
@@ -552,7 +624,7 @@ class TestVonageVideoWebrtcTransport:
 
         # trigger the _on_session_connected_cb to simulate being connected
         await self._run_in_thread(
-            lambda: client._on_session_connected_cb(vonage_video_mock.models.Session())
+            lambda: client._on_session_connected_cb(vonage_video_mock.models.Session(id="session"))
         )
         await self._wait_client_async_tasks(client)
 
@@ -708,7 +780,7 @@ class TestVonageVideoWebrtcTransport:
         audio_ready_cb = await connecting_future
 
         # Now both connects are waiting on the same promise, we can set it to complete
-        audio_ready_cb(vonage_video_mock.models.Session())
+        audio_ready_cb(vonage_video_mock.models.Session(id="session"))
 
         # await for the connections to now complete
         await asyncio.gather(connect1_task, connect2_task)
@@ -927,14 +999,14 @@ class TestVonageVideoWebrtcTransport:
         self.mock_client_instance.clear_media_buffers.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("pipecat.transports.vonage.video_webrtc.EVENT_QUEUE_MAXSIZE", 1)
+    @patch("pipecat.transports.vonage.video_webrtc.VIDEO_QUEUE_MAXSIZE", 1)
     async def test_vonage_client_sdk_cb_to_loop_full_queue(self) -> None:
         """Test VonageClient SDK callback to loop filling up the queue."""
         params = self.VonageVideoWebrtcTransportParams()
         client = await self._create_client(params)
 
         # Ensure the loop thread ID is set
-        assert client._event_queue is not None
+        assert client._video_queue is not None
         assert client._loop_thread_id == threading.get_ident()
 
         # Create a mock coroutine to queue
@@ -942,25 +1014,24 @@ class TestVonageVideoWebrtcTransport:
             pass
 
         # Fill queue to max size
-        for _ in range(client._event_queue.maxsize):
-            await client._event_queue.put(mock_task())
+        for _ in range(client._video_queue.maxsize):
+            await client._video_queue.put(mock_task())
 
         # Queue should be full
-        assert client._event_queue.qsize() == client._event_queue.maxsize
-
+        assert client._video_queue.qsize() == client._video_queue.maxsize
         # This should log an error and drop the event
         async_task = mock_task()
-        client._sdk_cb_to_loop("test_event", client._event_queue, async_task)
+        client._sdk_cb_to_loop("test_event", client._video_queue, async_task)
 
         # Queue should still be full (no new item added)
-        assert client._event_queue.qsize() == client._event_queue.maxsize
+        assert client._video_queue.qsize() == client._video_queue.maxsize
         # check the coroutine was closed and hence dropped
         assert inspect.getcoroutinestate(async_task) == "CORO_CLOSED"
 
         # Clean up the coroutine
-        task = await client._event_queue.get()
+        task = await client._video_queue.get()
         task.close()
-        client._event_queue.task_done()
+        client._video_queue.task_done()
 
     @pytest.mark.asyncio
     @patch("pipecat.transports.vonage.video_webrtc.create_stream_resampler")
@@ -1002,6 +1073,11 @@ class TestVonageVideoWebrtcTransport:
         assert frame.num_frames == 4
         assert frame.sample_rate == 48000
         assert frame.num_channels == 1
+
+    @pytest.mark.asyncio
+    async def test_vonage_client_get_video(self) -> None:
+        """Test VonageClient get video."""
+        pass
 
     @pytest.mark.asyncio
     async def test_vonage_client_write_audio(self) -> None:
@@ -1113,6 +1189,352 @@ class TestVonageVideoWebrtcTransport:
         assert bgr_image[0, 0, 2] == 100  # R channel (was B=100 in RGB)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "has_audio, has_video",
+        [
+            (True, False),
+            (False, True),
+            (True, True),
+        ],
+    )
+    async def test_vonage_client_subscribe_to_stream(
+        self, has_audio: bool, has_video: bool
+    ) -> None:
+        """Test VonageClient subscribe_to_stream with a stream that exists in session."""
+        params = self.VonageVideoWebrtcTransportParams(audio_in_enabled=True)
+        client = await self._create_client(params)
+
+        listener = self.VonageClientListener()
+        client.add_listener(listener)
+        on_subscriber_connected_mock = AsyncMock()
+        listener.on_subscriber_connected = on_subscriber_connected_mock
+        on_subscriber_disconnected_mock = AsyncMock()
+        listener.on_subscriber_disconnected = on_subscriber_disconnected_mock
+
+        await client.connect()
+
+        # Add a stream to the session
+        stream = vonage_video_mock.models.Stream(id="test_stream", connection=DUMMY_CONNECTION)
+        client._session_streams["test_stream"] = stream
+
+        # Setup subscriber callbacks
+        self._setup_subscriber_callbacks(client)
+
+        # Subscribe with audio and video
+        subscribe_params = SubscribeSettings(
+            subscribe_to_audio=has_audio,
+            subscribe_to_video=has_video,
+            preferred_resolution=(640, 480) if has_video else None,
+            preferred_framerate=30 if has_video else None,
+        )
+
+        subscriber = vonage_video_mock.models.Subscriber(stream=stream)
+        await self._subscribe_n_handle_callbacks(
+            client,
+            "test_stream",
+            subscribe_params,
+            lambda callbacks: callbacks.on_connected_cb(subscriber),
+        )
+        on_subscriber_connected_mock.assert_called_once_with(subscriber)
+
+        # Verify subscribe was called with correct parameters
+        self.mock_client_instance.subscribe.assert_called_once()
+        call_args = self.mock_client_instance.subscribe.call_args
+
+        expected_settings = MockSubscriberSettings(
+            subscribe_to_audio=has_audio,
+            subscribe_to_video=has_video,
+            video_settings=MockSubscriberVideoSettings(
+                preferred_resolution=MockVideoResolution(
+                    width=subscribe_params.preferred_resolution[0],
+                    height=subscribe_params.preferred_resolution[1],
+                )
+                if subscribe_params.preferred_resolution
+                else None,
+                preferred_framerate=subscribe_params.preferred_framerate,
+            ),
+        )
+
+        assert call_args[0][0] == stream
+        assert call_args[1]["settings"] == expected_settings
+
+        # Verify subscription was stored
+        assert "test_stream" in client._session_subscriptions
+        assert client._session_subscriptions["test_stream"] == subscribe_params
+
+        # check we can get a disconnect event from the subscriber
+        self._subscriber_callbacks["test_stream"].on_disconnected_cb(subscriber)
+        await self._wait_for_condition(lambda: on_subscriber_disconnected_mock.call_count > 0)
+        on_subscriber_disconnected_mock.assert_called_once_with(subscriber)
+
+    @pytest.mark.asyncio
+    async def test_vonage_client_subscribe_to_stream_timeout(self) -> None:
+        """Test VonageClient subscribe_to_stream when SDK subscribe times out."""
+        params = self.VonageVideoWebrtcTransportParams(audio_in_enabled=True)
+        client = await self._create_client(params)
+
+        await client.connect()
+
+        stream = vonage_video_mock.models.Stream(id="fail_stream", connection=DUMMY_CONNECTION)
+        client._session_streams["fail_stream"] = stream
+
+        self._setup_subscriber_callbacks(client)
+
+        subscribe_params = SubscribeSettings(subscribe_to_audio=True, subscribe_to_video=False)
+
+        # Patch the timeout to be very short for fast test execution
+        # the call never gets on_connected_cb or any other callback, it will timeout
+        with patch(
+            "pipecat.transports.vonage.video_webrtc.VIDEO_CONNECTOR_TIMEOUT",
+            timedelta(seconds=0.1),
+        ):
+            with pytest.raises(asyncio.TimeoutError):
+                await client.subscribe_to_stream("fail_stream", subscribe_params)
+
+    @pytest.mark.asyncio
+    async def test_vonage_client_subscribe_to_stream_fails(self) -> None:
+        """Test VonageClient subscribe_to_stream when SDK subscribe fails."""
+        params = self.VonageVideoWebrtcTransportParams(audio_in_enabled=True)
+        client = await self._create_client(params)
+
+        await client.connect()
+
+        stream = vonage_video_mock.models.Stream(id="fail_stream", connection=DUMMY_CONNECTION)
+        client._session_streams["fail_stream"] = stream
+
+        self._setup_subscriber_callbacks(client)
+        self.mock_client_instance.subscribe.side_effect = lambda *_, **__: False
+
+        subscribe_params = SubscribeSettings(subscribe_to_audio=True, subscribe_to_video=False)
+        with pytest.raises(VonageException) as exc_info:
+            await client.subscribe_to_stream("fail_stream", subscribe_params)
+
+        assert "Could not subscribe to stream" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_vonage_client_subscribe_to_stream_subscriber_error(self) -> None:
+        """Test VonageClient subscribe_to_stream when subscriber reports an error."""
+        params = self.VonageVideoWebrtcTransportParams(audio_in_enabled=True)
+        client = await self._create_client(params)
+
+        await client.connect()
+
+        stream = vonage_video_mock.models.Stream(id="error_stream", connection=DUMMY_CONNECTION)
+        client._session_streams["error_stream"] = stream
+
+        self._setup_subscriber_callbacks(client)
+
+        subscribe_params = SubscribeSettings(subscribe_to_audio=True, subscribe_to_video=False)
+
+        # Subscription should raise an exception
+        with pytest.raises(VonageException) as exc_info:
+            subscriber = vonage_video_mock.models.Subscriber(stream=stream)
+            await self._subscribe_n_handle_callbacks(
+                client,
+                "error_stream",
+                subscribe_params,
+                lambda callbacks: callbacks.on_error_cb(subscriber, "Connection failed", 1500),
+            )
+
+        assert "Subscriber error" in str(exc_info.value)
+        assert "Connection failed" in str(exc_info.value)
+        assert "(code 1500)" in str(exc_info.value)
+
+        # Verify subscription was removed
+        assert "error_stream" not in client._session_subscriptions
+
+    @pytest.mark.asyncio
+    async def test_vonage_client_subscribe_to_stream_subscriber_disconnected_before_connected(
+        self,
+    ) -> None:
+        """Test VonageClient subscribe_to_stream when subscriber disconnects before connecting."""
+        params = self.VonageVideoWebrtcTransportParams(audio_in_enabled=True)
+        client = await self._create_client(params)
+
+        await client.connect()
+
+        stream = vonage_video_mock.models.Stream(id="dc_stream", connection=DUMMY_CONNECTION)
+        client._session_streams["dc_stream"] = stream
+
+        self._setup_subscriber_callbacks(client)
+
+        # Add listener to track disconnection
+        listener = self.VonageClientListener()
+        on_subscriber_disconnected_mock = AsyncMock()
+        listener.on_subscriber_disconnected = on_subscriber_disconnected_mock
+        client.add_listener(listener)
+
+        subscribe_params = SubscribeSettings(subscribe_to_audio=True, subscribe_to_video=False)
+
+        # Subscription should raise an exception
+        subscriber = vonage_video_mock.models.Subscriber(stream=stream)
+        with pytest.raises(VonageException) as exc_info:
+            await self._subscribe_n_handle_callbacks(
+                client,
+                "dc_stream",
+                subscribe_params,
+                lambda callbacks: callbacks.on_disconnected_cb(subscriber),
+            )
+
+        assert "disconnected before connecting" in str(exc_info.value)
+
+        # Verify subscription was removed
+        assert "dc_stream" not in client._session_subscriptions
+
+        # Verify listener was called
+        listener.on_subscriber_disconnected.assert_awaited_once_with(subscriber)
+
+    @pytest.mark.asyncio
+    async def test_vonage_client_on_stream_received_triggers_listeners(self) -> None:
+        """Test that _on_stream_received_cb triggers on_stream_received listener callbacks."""
+        params = self.VonageVideoWebrtcTransportParams(
+            audio_in_enabled=True, audio_in_auto_subscribe=False
+        )
+        client = await self._create_client(params)
+
+        # Add multiple listeners
+        listener1 = self.VonageClientListener()
+        on_stream_received_mock1 = AsyncMock()
+        listener1.on_stream_received = on_stream_received_mock1
+        client.add_listener(listener1)
+
+        listener2 = self.VonageClientListener()
+        on_stream_received_mock2 = AsyncMock()
+        listener2.on_stream_received = on_stream_received_mock2
+        client.add_listener(listener2)
+
+        await client.connect()
+
+        session = vonage_video_mock.models.Session(id="test_session")
+        stream = vonage_video_mock.models.Stream(id="test_stream", connection=DUMMY_CONNECTION)
+
+        # Trigger the callback
+        client._on_stream_received_cb(session, stream)
+
+        # Wait for async processing
+        await self._wait_for_condition(
+            lambda: on_stream_received_mock1.await_count > 0
+            and on_stream_received_mock2.await_count > 0
+        )
+
+        # Verify both listeners were called
+        on_stream_received_mock1.assert_awaited_once_with(session, stream)
+        on_stream_received_mock2.assert_awaited_once_with(session, stream)
+
+        # Verify stream was added to session streams
+        assert "test_stream" in client._session_streams
+        assert client._session_streams["test_stream"] == stream
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "auto_audio, auto_video",
+        [
+            (True, False),
+            (False, True),
+            (True, True),
+            (False, False),
+        ],
+    )
+    async def test_vonage_client_on_stream_received_auto_subscribe(
+        self, auto_audio: bool, auto_video: bool
+    ) -> None:
+        """Test that _on_stream_received_cb auto-subscribes when auto_subscribe is enabled."""
+        params = self.VonageVideoWebrtcTransportParams(
+            audio_in_enabled=True,
+            video_in_enabled=True,
+            audio_in_auto_subscribe=auto_audio,
+            video_in_auto_subscribe=auto_video,
+            video_in_preferred_resolution=(640, 480) if auto_video else None,
+            video_in_preferred_framerate=25 if auto_video else None,
+        )
+        client = await self._create_client(params)
+
+        await client.connect()
+
+        self._setup_subscriber_callbacks(client)
+
+        session = vonage_video_mock.models.Session(id="test_session")
+        stream = vonage_video_mock.models.Stream(id="auto_sub_stream", connection=DUMMY_CONNECTION)
+
+        # Trigger the callback
+        client._on_stream_received_cb(session, stream)
+        await self._wait_for_condition(lambda: stream.id in client._session_streams)
+
+        if not auto_audio and not auto_video:
+            await self._wait_client_async_tasks(client)
+            # No auto-subscribe should happen
+            await self._wait_client_async_tasks(client)
+            self.mock_client_instance.subscribe.assert_not_called()
+            return
+
+        # Wait for auto-subscribe to happen
+        await self._wait_for_condition(lambda: "auto_sub_stream" in self._subscriber_callbacks)
+
+        # Verify subscribe was called
+        self.mock_client_instance.subscribe.assert_called_once()
+        call_args = self.mock_client_instance.subscribe.call_args
+
+        # Verify subscription settings
+        expected_settings = MockSubscriberSettings(
+            subscribe_to_audio=auto_audio,
+            subscribe_to_video=auto_video,
+            video_settings=MockSubscriberVideoSettings(
+                preferred_resolution=MockVideoResolution(width=640, height=480)
+                if auto_video
+                else None,
+                preferred_framerate=25 if auto_video else None,
+            ),
+        )
+        assert call_args[0][0] == stream
+        assert call_args[1]["settings"] == expected_settings
+
+        # Verify subscription was stored
+        assert "auto_sub_stream" in client._session_subscriptions
+        assert client._session_subscriptions["auto_sub_stream"].subscribe_to_audio == auto_audio
+        assert client._session_subscriptions["auto_sub_stream"].subscribe_to_video == auto_video
+
+        self._subscriber_callbacks["auto_sub_stream"].on_connected_cb(MockSubscriber(stream=stream))
+        await self._wait_client_async_tasks(client)
+
+    @pytest.mark.asyncio
+    async def test_vonage_client_on_stream_received_skips_existing_subscription(self) -> None:
+        """Test that _on_stream_received_cb does not auto-subscribe if stream is already subscribed."""
+        params = self.VonageVideoWebrtcTransportParams(
+            audio_in_enabled=True, audio_in_auto_subscribe=True
+        )
+        client = await self._create_client(params)
+
+        listener = self.VonageClientListener()
+        on_stream_received_mock = AsyncMock()
+        listener.on_stream_received = on_stream_received_mock
+        client.add_listener(listener)
+
+        await client.connect()
+
+        self._setup_subscriber_callbacks(client)
+
+        session = vonage_video_mock.models.Session(id="test_session")
+        stream = vonage_video_mock.models.Stream(id="existing_stream", connection=DUMMY_CONNECTION)
+
+        # Manually add an existing subscription
+        client._session_subscriptions["existing_stream"] = SubscribeSettings(
+            subscribe_to_audio=True, subscribe_to_video=False
+        )
+
+        # Trigger the callback
+        client._on_stream_received_cb(session, stream)
+
+        # Wait for listener to be called
+        await self._wait_for_condition(lambda: on_stream_received_mock.await_count > 0)
+        on_stream_received_mock.assert_awaited_once_with(session, stream)
+
+        # Wait to ensure no subscription happens
+        await self._wait_client_async_tasks(client)
+
+        # Verify subscribe was NOT called (because subscription already exists)
+        self.mock_client_instance.subscribe.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_vonage_client_events(self) -> None:
         """Test VonageClient events"""
         params = self.VonageVideoWebrtcTransportParams(
@@ -1126,6 +1548,7 @@ class TestVonageVideoWebrtcTransport:
         # Mock the connect method to return True
         self.mock_client_instance.connect.return_value = True
         self._setup_audio_ready_callback(client)
+        self._setup_subscriber_callbacks(client)
 
         # create a listener
         listener = self.VonageClientListener()
@@ -1153,7 +1576,7 @@ class TestVonageVideoWebrtcTransport:
         error_code = 500
 
         client._on_session_error_cb(session, error_description, error_code)
-        await self._wait_for_condition(lambda: on_error_mock.call_count > 0)
+        await self._wait_for_condition(lambda: on_error_mock.await_count > 0)
 
         listener.on_error.assert_called_once_with(session, error_description, error_code)
         listener.on_error.reset_mock()
@@ -1168,66 +1591,140 @@ class TestVonageVideoWebrtcTransport:
         )
 
         client._on_session_audio_data_cb(session, mock_audio_data)
-        await self._wait_for_condition(lambda: on_audio_in_mock.call_count > 0)
+        await self._wait_for_condition(lambda: on_audio_in_mock.await_count > 0)
 
-        listener.on_audio_in.assert_called_once_with(session, ANY)
+        listener.on_audio_in.assert_awaited_once_with(session, ANY)
         frame = listener.on_audio_in.call_args[0][1]
         assert frame.audio == audio_buffer.tobytes()
         assert frame.sample_rate == 48000
         assert frame.num_channels == 2
         listener.on_audio_in.reset_mock()
-
         # Test _on_stream_received_cb triggers on_stream_received
-        stream = vonage_video_mock.models.Stream(id="test_stream")
-        self.mock_client_instance.subscribe = MagicMock()
+        stream = vonage_video_mock.models.Stream(id="test_stream", connection=DUMMY_CONNECTION)
 
         client._on_stream_received_cb(session, stream)
-        await self._wait_for_condition(lambda: on_stream_received_mock.call_count > 0)
+        await self._wait_for_condition(lambda: on_stream_received_mock.await_count > 0)
+        listener.on_stream_received.assert_awaited_once_with(session, stream)
 
-        listener.on_stream_received.assert_called_once_with(session, stream)
+        await self._wait_for_condition(lambda: stream.id in self._subscriber_callbacks)
+
+        assert stream.id in self._subscriber_callbacks
+        callbacks = self._subscriber_callbacks[stream.id]
         self.mock_client_instance.subscribe.assert_called_once_with(
             stream,
-            on_error_cb=client._on_subscriber_error_cb,
-            on_connected_cb=client._on_subscriber_connected_cb,
-            on_disconnected_cb=client._on_subscriber_disconnected_cb,
+            settings=ANY,
+            on_error_cb=callbacks.on_error_cb,
+            on_connected_cb=callbacks.on_connected_cb,
+            on_disconnected_cb=callbacks.on_disconnected_cb,
+            on_render_frame_cb=client._on_subscriber_video_data_cb,
         )
         listener.on_stream_received.reset_mock()
+
+        subscriber = vonage_video_mock.models.Subscriber(stream=stream)
+        callbacks.on_connected_cb(subscriber)
+        await self._wait_for_condition(lambda: on_subscriber_connected_mock.await_count > 0)
+        listener.on_subscriber_connected.assert_awaited_once()
+        listener.on_subscriber_connected.reset_mock()
+
+        # Test _on_subscriber_disconnected_cb triggers on_subscriber_disconnected
+        callbacks.on_disconnected_cb(subscriber)
+        await self._wait_for_condition(lambda: on_subscriber_disconnected_mock.await_count > 0)
+
+        listener.on_subscriber_disconnected.assert_awaited_once_with(subscriber)
+        listener.on_subscriber_disconnected.reset_mock()
 
         # Test _on_stream_dropped_cb triggers on_stream_dropped
         self.mock_client_instance.unsubscribe = MagicMock()
 
         client._on_stream_dropped_cb(session, stream)
-        await self._wait_for_condition(lambda: on_stream_dropped_mock.call_count > 0)
+        await self._wait_for_condition(lambda: on_stream_dropped_mock.await_count > 0)
 
-        listener.on_stream_dropped.assert_called_once_with(session, stream)
-        self.mock_client_instance.unsubscribe.assert_called_once_with(stream)
+        listener.on_stream_dropped.assert_awaited_once_with(session, stream)
+        self.mock_client_instance.unsubscribe.assert_not_called()
         listener.on_stream_dropped.reset_mock()
 
         # Test _on_subscriber_connected_cb triggers on_subscriber_connected
-        subscriber_stream = vonage_video_mock.models.Stream(id="subscriber_stream")
+        subscriber_stream = vonage_video_mock.models.Stream(
+            id="subscriber_stream", connection=DUMMY_CONNECTION
+        )
         subscriber = vonage_video_mock.models.Subscriber(stream=subscriber_stream)
-
-        client._on_subscriber_connected_cb(subscriber)
-        await self._wait_for_condition(lambda: on_subscriber_connected_mock.call_count > 0)
-
-        listener.on_subscriber_connected.assert_called_once_with(subscriber)
-        listener.on_subscriber_connected.reset_mock()
-
-        # Test _on_subscriber_disconnected_cb triggers on_subscriber_disconnected
-        client._on_subscriber_disconnected_cb(subscriber)
-        await self._wait_for_condition(lambda: on_subscriber_disconnected_mock.call_count > 0)
-
-        listener.on_subscriber_disconnected.assert_called_once_with(subscriber)
-        listener.on_subscriber_disconnected.reset_mock()
 
         # Test error callbacks are logged but don't trigger listener events
         # (these are internal error callbacks, not session errors)
-        publisher_stream = vonage_video_mock.models.Stream(id="publisher_stream")
+        publisher_stream = vonage_video_mock.models.Stream(
+            id="publisher_stream", connection=DUMMY_CONNECTION
+        )
         publisher = vonage_video_mock.models.Publisher(stream=publisher_stream)
 
         # These should not raise exceptions
         client._on_publisher_error_cb(publisher, "publisher error", 400)
-        client._on_subscriber_error_cb(subscriber, "subscriber error", 401)
+        callbacks.on_error_cb(subscriber, "subscriber error", 401)
+
+        await self._wait_client_async_tasks(client)
+
+    @pytest.mark.asyncio
+    async def test_vonage_client_on_subscriber_video_data_cb_rgb_format(self) -> None:
+        """Test _on_subscriber_video_data_cb with RGB format video frames."""
+        from pipecat.frames.frames import UserImageRawFrame
+
+        params = self.VonageVideoWebrtcTransportParams(
+            video_in_enabled=True,
+            video_in_auto_subscribe=False,
+        )
+        client = await self._create_client(params)
+
+        # Add listener to capture video frames
+        listener = self.VonageClientListener()
+        on_video_in_mock = AsyncMock()
+        listener.on_video_in = on_video_in_mock
+        client.add_listener(listener)
+
+        await client.connect()
+
+        # Create a test RGB video frame (4x4, 3 channels)
+        width, height = 4, 4
+        rgb_image = np.zeros((height, width, 3), dtype=np.uint8)
+        rgb_image[:, :, 0] = 100  # R channel
+        rgb_image[:, :, 1] = 150  # G channel
+        rgb_image[:, :, 2] = 200  # B channel
+
+        rgb_bytes = rgb_image.tobytes()
+
+        # Create mock video frame with RGB24 format (which Vonage uses for RGB)
+        mock_video_frame = vonage_video_mock.models.VideoFrame(
+            frame_buffer=memoryview(rgb_bytes),
+            resolution=MockVideoResolution(width=width, height=height),
+            format="RGB24",
+        )
+
+        # Create mock subscriber
+        stream = vonage_video_mock.models.Stream(id="video_stream", connection=DUMMY_CONNECTION)
+        subscriber = vonage_video_mock.models.Subscriber(stream=stream)
+
+        # Trigger the callback
+        client._on_subscriber_video_data_cb(subscriber, mock_video_frame)
+
+        # Wait for async processing
+        await self._wait_for_condition(lambda: on_video_in_mock.await_count > 0)
+
+        # Verify listener was called
+        on_video_in_mock.assert_awaited_once()
+        call_args = on_video_in_mock.call_args[0]
+        assert call_args[0] == subscriber
+
+        # Get the processed frame
+        processed_frame: UserImageRawFrame = call_args[1]
+        assert processed_frame.user_id == "video_stream"
+        assert processed_frame.size == (width, height)
+        assert processed_frame.format == "RGB"
+
+        # Verify BGR to RGB conversion happened
+        processed_image = np.frombuffer(processed_frame.image, dtype=np.uint8).reshape(
+            height, width, 3
+        )
+        assert processed_image[0, 0, 0] == 200  # R channel (was B in BGR)
+        assert processed_image[0, 0, 1] == 150  # G channel (unchanged)
+        assert processed_image[0, 0, 2] == 100  # B channel (was R in BGR)
 
     @pytest.mark.asyncio
     async def test_vonage_input_transport_initialization(self) -> None:
@@ -1588,9 +2085,48 @@ class TestVonageVideoWebrtcTransport:
             )
 
             # Call the audio callback
-            await transport._audio_in_cb(vonage_video_mock.models.Session(), audio_frame)
+            await transport._audio_in_cb(
+                vonage_video_mock.models.Session(id="session"), audio_frame
+            )
 
             mock_push_audio_frame.assert_called_once_with(audio_frame)
+
+    @pytest.mark.asyncio
+    async def test_vonage_input_video_callback(self) -> None:
+        """Test video input callback processing."""
+
+        params = self.VonageVideoWebrtcTransportParams(
+            video_in_enabled=True,
+        )
+        transport = await self._create_input_transport(params)
+        client = transport._client
+
+        with (
+            patch.object(transport, "push_video_frame", AsyncMock()) as mock_push_video_frame,
+            patch.object(client, "connect", AsyncMock(return_value=1)),
+        ):
+            start_frame = StartFrame()
+            await transport.start(start_frame)
+
+            # Create mock video frame
+            width, height = 640, 480
+            rgb_image = np.zeros((height, width, 3), dtype=np.uint8)
+            rgb_image[:, :, 0] = 100  # R channel
+            rgb_image[:, :, 1] = 150  # G channel
+            rgb_image[:, :, 2] = 200  # B channel
+
+            video_frame = UserImageRawFrame(
+                user_id="test-user", image=rgb_image.tobytes(), size=(width, height), format="RGB"
+            )
+
+            # Create mock subscriber
+            stream = vonage_video_mock.models.Stream(id="video_stream", connection=DUMMY_CONNECTION)
+            subscriber = vonage_video_mock.models.Subscriber(stream=stream)
+
+            # Call the video callback
+            await transport._video_in_cb(subscriber, video_frame)
+
+            mock_push_video_frame.assert_called_once_with(video_frame)
 
     @pytest.mark.asyncio
     async def test_vonage_transport_event_handlers(self) -> None:
