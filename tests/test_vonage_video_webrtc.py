@@ -173,6 +173,7 @@ sys.modules["vonage_video_connector.models"] = vonage_video_mock.models
 # Now we can import the transport classes since the vonage_video module is mocked
 from pipecat.transports.vonage.video_webrtc import (
     AudioProps,
+    ImageFormat,
     SubscribeSettings,
     VonageClient,
     VonageClientListener,
@@ -182,6 +183,7 @@ from pipecat.transports.vonage.video_webrtc import (
     VonageVideoWebrtcTransport,
     VonageVideoWebrtcTransportParams,
     check_audio_data,
+    image_colorspace_conversion,
     process_audio,
     process_audio_channels,
 )
@@ -529,7 +531,7 @@ class TestVonageVideoWebrtcTransport:
         params.audio_in_sample_rate = 44100 if has_video else 22050
         params.audio_out_sample_rate = 22050 if has_video else 44100
         params.session_enable_migration = has_video
-        params.video_out_color_format = "YUV" if has_audio else "RGB"
+        params.video_out_color_format = "YCbCr" if has_audio else "RGB"
         params.video_out_framerate = 30 if has_audio else 15
         params.video_out_width = 1280 if has_audio else 640
         params.video_out_height = 720 if has_audio else 480
@@ -575,7 +577,7 @@ class TestVonageVideoWebrtcTransport:
                         height=params.video_out_height,
                     ),
                     fps=params.video_out_framerate,
-                    format=self.VonageClient.vonage_image_format(params.video_out_color_format),
+                    format=client._video_out_color_format_vonage,
                 ),
             ),
             enable_migration=params.session_enable_migration,
@@ -1949,7 +1951,7 @@ class TestVonageVideoWebrtcTransport:
                 video_out_enabled=True,
                 video_out_width=640,
                 video_out_height=480,
-                video_out_color_format="YUV",
+                video_out_color_format="YCbCr",
             )
         )
 
@@ -2451,3 +2453,378 @@ class TestAudioNormalization:
         # Should detect that 3 bytes / (2 frames * 1 channel) = 1.5 bytes per sample
         # which gets truncated to 1 byte per sample = 8 bit
         assert "16 bit PCM" in str(exc_info.value)
+
+
+class TestColorspaceConversion:
+    """Test cases for image colorspace conversion functions."""
+
+    def test_same_format_no_conversion(self) -> None:
+        """Test that conversion with same source and target format returns original image."""
+        width, height = 4, 4
+        image_data = np.random.randint(0, 256, width * height * 3, dtype=np.uint8).tobytes()
+
+        # Test all formats with themselves
+        for fmt in ImageFormat:
+            result = image_colorspace_conversion(image_data, (width, height), fmt, fmt)
+            assert result == image_data
+
+    def test_rgb_to_bgr_conversion(self) -> None:
+        """Test RGB to BGR conversion."""
+        width, height = 2, 2
+        # Create a simple RGB image with distinct colors
+        rgb_image = np.array(
+            [
+                [[255, 0, 0], [0, 255, 0]],  # Red, Green
+                [[0, 0, 255], [255, 255, 0]],  # Blue, Yellow
+            ],
+            dtype=np.uint8,
+        )
+
+        result = image_colorspace_conversion(
+            rgb_image.tobytes(),
+            (width, height),
+            ImageFormat.RGB,
+            ImageFormat.BGR,
+        )
+
+        # Expected BGR: R and B channels swapped
+        expected = np.array(
+            [
+                [[0, 0, 255], [0, 255, 0]],  # Blue, Green (unchanged)
+                [[255, 0, 0], [0, 255, 255]],  # Red, Cyan
+            ],
+            dtype=np.uint8,
+        )
+
+        assert result is not None
+        result_array = np.frombuffer(result, dtype=np.uint8).reshape(height, width, 3)
+        np.testing.assert_array_equal(result_array, expected)
+
+    def test_bgr_to_rgb_conversion(self) -> None:
+        """Test BGR to RGB conversion (should be same as RGB to BGR)."""
+        width, height = 2, 2
+        bgr_image = np.array(
+            [
+                [[255, 0, 0], [0, 255, 0]],
+                [[0, 0, 255], [255, 255, 0]],
+            ],
+            dtype=np.uint8,
+        )
+
+        result = image_colorspace_conversion(
+            bgr_image.tobytes(),
+            (width, height),
+            ImageFormat.BGR,
+            ImageFormat.RGB,
+        )
+
+        # R and B channels should be swapped
+        expected = np.array(
+            [
+                [[0, 0, 255], [0, 255, 0]],
+                [[255, 0, 0], [0, 255, 255]],
+            ],
+            dtype=np.uint8,
+        )
+
+        assert result is not None
+        result_array = np.frombuffer(result, dtype=np.uint8).reshape(height, width, 3)
+        np.testing.assert_array_equal(result_array, expected)
+
+    def test_rgba_to_bgra_conversion(self) -> None:
+        """Test RGBA to BGRA conversion."""
+        width, height = 2, 2
+        rgba_image = np.array(
+            [
+                [[255, 0, 0, 255], [0, 255, 0, 200]],  # Red opaque, Green semi-transparent
+                [[0, 0, 255, 150], [255, 255, 0, 100]],  # Blue, Yellow
+            ],
+            dtype=np.uint8,
+        )
+
+        result = image_colorspace_conversion(
+            rgba_image.tobytes(),
+            (width, height),
+            ImageFormat.RGBA,
+            ImageFormat.BGRA,
+        )
+
+        # Expected: R and B swapped, alpha unchanged
+        expected = np.array(
+            [
+                [[0, 0, 255, 255], [0, 255, 0, 200]],
+                [[255, 0, 0, 150], [0, 255, 255, 100]],
+            ],
+            dtype=np.uint8,
+        )
+
+        assert result is not None
+        result_array = np.frombuffer(result, dtype=np.uint8).reshape(height, width, 4)
+        np.testing.assert_array_equal(result_array, expected)
+
+    def test_bgra_to_rgba_conversion(self) -> None:
+        """Test BGRA to RGBA conversion."""
+        width, height = 2, 2
+        bgra_image = np.array(
+            [
+                [[255, 0, 0, 255], [0, 255, 0, 200]],
+                [[0, 0, 255, 150], [255, 255, 0, 100]],
+            ],
+            dtype=np.uint8,
+        )
+
+        result = image_colorspace_conversion(
+            bgra_image.tobytes(),
+            (width, height),
+            ImageFormat.BGRA,
+            ImageFormat.RGBA,
+        )
+
+        expected = np.array(
+            [
+                [[0, 0, 255, 255], [0, 255, 0, 200]],
+                [[255, 0, 0, 150], [0, 255, 255, 100]],
+            ],
+            dtype=np.uint8,
+        )
+
+        assert result is not None
+        result_array = np.frombuffer(result, dtype=np.uint8).reshape(height, width, 4)
+        np.testing.assert_array_equal(result_array, expected)
+
+    def test_planar_yuv420_to_packed_yuv444_conversion(self) -> None:
+        """Test planar YUV420 to packed YUV444 conversion."""
+        width, height = 4, 4
+
+        # Create YUV420 planar data
+        # Y plane: 4x4 = 16 bytes
+        y_plane = np.array(
+            [100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200, 210, 220, 230, 240, 250],
+            dtype=np.uint8,
+        )
+
+        # U plane: 2x2 = 4 bytes (subsampled)
+        u_plane = np.array([50, 60, 70, 80], dtype=np.uint8)
+
+        # V plane: 2x2 = 4 bytes (subsampled)
+        v_plane = np.array([90, 100, 110, 120], dtype=np.uint8)
+
+        yuv420_data = np.concatenate([y_plane, u_plane, v_plane])
+
+        result = image_colorspace_conversion(
+            yuv420_data.tobytes(),
+            (width, height),
+            ImageFormat.PLANAR_YUV420,
+            ImageFormat.PACKED_YUV444,
+        )
+
+        assert result is not None
+        result_array = np.frombuffer(result, dtype=np.uint8).reshape(height, width, 3)
+
+        # Check that Y plane values are preserved
+        assert result_array[0, 0, 0] == 100
+        assert result_array[0, 1, 0] == 110
+        assert result_array[3, 3, 0] == 250
+
+        # Check that U and V planes are upsampled (each 2x2 block should have same U/V values)
+        # Top-left 2x2 block should have U=50, V=90
+        assert result_array[0, 0, 1] == 50
+        assert result_array[0, 0, 2] == 90
+        assert result_array[0, 1, 1] == 50
+        assert result_array[0, 1, 2] == 90
+        assert result_array[1, 0, 1] == 50
+        assert result_array[1, 0, 2] == 90
+        assert result_array[1, 1, 1] == 50
+        assert result_array[1, 1, 2] == 90
+
+        # Top-right 2x2 block should have U=60, V=100
+        assert result_array[0, 2, 1] == 60
+        assert result_array[0, 2, 2] == 100
+
+    def test_packed_yuv444_to_planar_yuv420_conversion(self) -> None:
+        """Test packed YUV444 to planar YUV420 conversion."""
+        width, height = 4, 4
+
+        # Create packed YUV444 data (interleaved YUVYUVYUV...)
+        # Each pixel has Y, U, V values
+        packed_yuv444 = np.zeros((height, width, 3), dtype=np.uint8)
+
+        # Set Y values
+        packed_yuv444[:, :, 0] = np.arange(100, 100 + width * height, dtype=np.uint8).reshape(
+            height, width
+        )
+
+        # Set U values (will be downsampled)
+        packed_yuv444[0:2, 0:2, 1] = 50  # Top-left block
+        packed_yuv444[0:2, 2:4, 1] = 60  # Top-right block
+        packed_yuv444[2:4, 0:2, 1] = 70  # Bottom-left block
+        packed_yuv444[2:4, 2:4, 1] = 80  # Bottom-right block
+
+        # Set V values (will be downsampled)
+        packed_yuv444[0:2, 0:2, 2] = 90
+        packed_yuv444[0:2, 2:4, 2] = 100
+        packed_yuv444[2:4, 0:2, 2] = 110
+        packed_yuv444[2:4, 2:4, 2] = 120
+
+        result = image_colorspace_conversion(
+            packed_yuv444.tobytes(),
+            (width, height),
+            ImageFormat.PACKED_YUV444,
+            ImageFormat.PLANAR_YUV420,
+        )
+
+        assert result is not None
+
+        # Parse the planar YUV420 result
+        y_plane_size = width * height
+        uv_plane_size = (width // 2) * (height // 2)
+
+        result_array = np.frombuffer(result, dtype=np.uint8)
+        y_result = result_array[:y_plane_size]
+        u_result = result_array[y_plane_size : y_plane_size + uv_plane_size]
+        v_result = result_array[y_plane_size + uv_plane_size :]
+
+        # Check Y plane is preserved
+        expected_y = np.arange(100, 100 + width * height, dtype=np.uint8)
+        np.testing.assert_array_equal(y_result, expected_y)
+
+        # Check U plane is downsampled (should be 2x2)
+        expected_u = np.array([50, 60, 70, 80], dtype=np.uint8)
+        np.testing.assert_array_equal(u_result, expected_u)
+
+        # Check V plane is downsampled
+        expected_v = np.array([90, 100, 110, 120], dtype=np.uint8)
+        np.testing.assert_array_equal(v_result, expected_v)
+
+    def test_unsupported_conversion_returns_none(self) -> None:
+        """Test that unsupported conversions return None."""
+        width, height = 4, 4
+        image_data = np.random.randint(0, 256, width * height * 3, dtype=np.uint8).tobytes()
+
+        # Test some unsupported conversions
+        result = image_colorspace_conversion(
+            image_data,
+            (width, height),
+            ImageFormat.RGB,
+            ImageFormat.PLANAR_YUV420,
+        )
+        assert result is None
+
+        result = image_colorspace_conversion(
+            image_data,
+            (width, height),
+            ImageFormat.RGBA,
+            ImageFormat.RGB,
+        )
+        assert result is None
+
+        result = image_colorspace_conversion(
+            image_data,
+            (width, height),
+            ImageFormat.PLANAR_YUV420,
+            ImageFormat.BGR,
+        )
+        assert result is None
+
+    def test_conversion_with_different_sizes(self) -> None:
+        """Test conversions work with different image sizes."""
+        test_sizes = [(2, 2), (4, 4), (8, 8), (16, 16)]
+
+        for width, height in test_sizes:
+            # Test RGB to BGR
+            rgb_image = np.random.randint(0, 256, (height, width, 3), dtype=np.uint8)
+            result = image_colorspace_conversion(
+                rgb_image.tobytes(),
+                (width, height),
+                ImageFormat.RGB,
+                ImageFormat.BGR,
+            )
+            assert result is not None
+            assert len(result) == width * height * 3
+
+    def test_yuv420_to_yuv444_roundtrip_preserves_y_plane(self) -> None:
+        """Test that Y plane is preserved in YUV420 -> YUV444 -> YUV420 conversion."""
+        width, height = 4, 4
+
+        # Create original YUV420 data
+        y_plane_orig = np.arange(0, width * height, dtype=np.uint8)
+        u_plane_orig = np.array([50, 60, 70, 80], dtype=np.uint8)
+        v_plane_orig = np.array([90, 100, 110, 120], dtype=np.uint8)
+        yuv420_orig = np.concatenate([y_plane_orig, u_plane_orig, v_plane_orig])
+
+        # Convert to YUV444
+        yuv444 = image_colorspace_conversion(
+            yuv420_orig.tobytes(),
+            (width, height),
+            ImageFormat.PLANAR_YUV420,
+            ImageFormat.PACKED_YUV444,
+        )
+        assert yuv444 is not None
+
+        # Convert back to YUV420
+        yuv420_result = image_colorspace_conversion(
+            yuv444,
+            (width, height),
+            ImageFormat.PACKED_YUV444,
+            ImageFormat.PLANAR_YUV420,
+        )
+        assert yuv420_result is not None
+
+        # Extract Y plane from result
+        result_array = np.frombuffer(yuv420_result, dtype=np.uint8)
+        y_plane_result = result_array[: width * height]
+
+        # Y plane should be identical after roundtrip
+        np.testing.assert_array_equal(y_plane_result, y_plane_orig)
+
+    def test_rgb_bgr_roundtrip(self) -> None:
+        """Test that RGB -> BGR -> RGB conversion preserves data."""
+        width, height = 4, 4
+        rgb_orig = np.random.randint(0, 256, (height, width, 3), dtype=np.uint8)
+
+        # Convert to BGR
+        bgr = image_colorspace_conversion(
+            rgb_orig.tobytes(),
+            (width, height),
+            ImageFormat.RGB,
+            ImageFormat.BGR,
+        )
+        assert bgr is not None
+
+        # Convert back to RGB
+        rgb_result = image_colorspace_conversion(
+            bgr,
+            (width, height),
+            ImageFormat.BGR,
+            ImageFormat.RGB,
+        )
+        assert rgb_result is not None
+
+        result_array = np.frombuffer(rgb_result, dtype=np.uint8).reshape(height, width, 3)
+        np.testing.assert_array_equal(result_array, rgb_orig)
+
+    def test_rgba_bgra_roundtrip(self) -> None:
+        """Test that RGBA -> BGRA -> RGBA conversion preserves data."""
+        width, height = 4, 4
+        rgba_orig = np.random.randint(0, 256, (height, width, 4), dtype=np.uint8)
+
+        # Convert to BGRA
+        bgra = image_colorspace_conversion(
+            rgba_orig.tobytes(),
+            (width, height),
+            ImageFormat.RGBA,
+            ImageFormat.BGRA,
+        )
+        assert bgra is not None
+
+        # Convert back to RGBA
+        rgba_result = image_colorspace_conversion(
+            bgra,
+            (width, height),
+            ImageFormat.BGRA,
+            ImageFormat.RGBA,
+        )
+        assert rgba_result is not None
+
+        result_array = np.frombuffer(rgba_result, dtype=np.uint8).reshape(height, width, 4)
+        np.testing.assert_array_equal(result_array, rgba_orig)

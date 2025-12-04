@@ -8,6 +8,7 @@ from collections.abc import Coroutine
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from enum import StrEnum
 from typing import Any, Awaitable, Callable, Optional, TypeVar
 
 import numpy as np
@@ -140,6 +141,59 @@ class VonageClientListener:
     on_video_in: Callable[[Subscriber, UserImageRawFrame], Awaitable[None]] = async_noop
 
 
+# the following StrEnum's don't use auto() to use the right capitalization
+
+
+class ImageFormat(StrEnum):
+    """Enum for image formats."""
+
+    PLANAR_YUV420 = "PLANAR_YUV420"
+    PACKED_YUV444 = "PACKED_YUV444"
+    RGB = "RGB"
+    RGBA = "RGBA"
+    BGR = "BGR"
+    BGRA = "BGRA"
+
+
+class VonageImageFormat(StrEnum):
+    """Enum for Vonage image formats."""
+
+    YUV420P = "YUV420P"
+    RGB24 = "RGB24"
+    ARGB32 = "ARGB32"
+
+
+class PipecatImageFormat(StrEnum):
+    """Enum for Pipecat image formats."""
+
+    RGB = "RGB"
+    RGBA = "RGBA"
+    YCbCr = "YCbCr"
+
+
+PIPECAT_TO_STANDARD_FORMAT_MAP: dict[PipecatImageFormat, ImageFormat] = {
+    PipecatImageFormat.YCbCr: ImageFormat.PACKED_YUV444,
+    PipecatImageFormat.RGB: ImageFormat.RGB,
+    PipecatImageFormat.RGBA: ImageFormat.RGBA,
+}
+
+VONAGE_TO_STANDARD_FORMAT_MAP: dict[VonageImageFormat, ImageFormat] = {
+    VonageImageFormat.YUV420P: ImageFormat.PLANAR_YUV420,
+    VonageImageFormat.RGB24: ImageFormat.BGR,
+    VonageImageFormat.ARGB32: ImageFormat.BGRA,
+}
+
+VONAGE_TO_PIPECAT_ANALOG_FORMAT_MAP: dict[VonageImageFormat, PipecatImageFormat] = {
+    VonageImageFormat.YUV420P: PipecatImageFormat.YCbCr,
+    VonageImageFormat.RGB24: PipecatImageFormat.RGB,
+    VonageImageFormat.ARGB32: PipecatImageFormat.RGBA,
+}
+
+PIPECAT_TO_VONAGE_ANALOG_FORMAT_MAP: dict[PipecatImageFormat, VonageImageFormat] = {
+    v: k for k, v in VONAGE_TO_PIPECAT_ANALOG_FORMAT_MAP.items()
+}
+
+
 @dataclass
 class AudioProps:
     """Audio properties for normalization.
@@ -160,20 +214,18 @@ AUDIO_QUEUE_MAXSIZE: int = 500
 VIDEO_QUEUE_MAXSIZE: int = 50
 
 TA = TypeVar("TA", InputAudioRawFrame, OutputAudioRawFrame)
-TV = TypeVar("TV", UserImageRawFrame, OutputImageRawFrame)
+TE = TypeVar("TE", bound=StrEnum)
 SimpleCoroutine = Coroutine[Any, Any, None]
 
-
-PIPECAT_TO_VONAGE_FORMAT_MAP: dict[str, str] = {
-    "YUV": "YUV420P",
-    "RGB": "RGB24",
-    "ARGB": "ARGB32",
-}
-VONAGE_TO_PIPECAT_FORMAT_MAP: dict[str, str] = {
-    v: k for k, v in PIPECAT_TO_VONAGE_FORMAT_MAP.items()
-}
-
 DUMMY_CONNECTION = Connection(id="", creation_time=datetime.min)
+
+
+def _to_enum(value: Optional[str], enum_cls: type[TE]) -> Optional[TE]:
+    """Convert a string value to the specified StrEnum type, returning None if invalid."""
+    try:
+        return enum_cls(value or "")
+    except ValueError:
+        return None
 
 
 class VonageClient:
@@ -241,6 +293,18 @@ class VonageClient:
 
         self._session_streams: dict[str, Stream] = {}
         self._session_subscriptions: dict[str, SubscribeSettings] = {}
+        out_pipecat_format = _to_enum(params.video_out_color_format or "RGB", PipecatImageFormat)
+        if out_pipecat_format is None:
+            raise VonageException(
+                f"Unsupported Pipecat output color format: {params.video_out_color_format}"
+            )
+        self._out_pipecat_format: PipecatImageFormat = out_pipecat_format
+        self._video_out_color_format_vonage: VonageImageFormat = (
+            PIPECAT_TO_VONAGE_ANALOG_FORMAT_MAP[self._out_pipecat_format]
+        )
+        self._video_out_color_format: ImageFormat = VONAGE_TO_STANDARD_FORMAT_MAP[
+            self._video_out_color_format_vonage
+        ]
 
     async def setup(self, setup: FrameProcessorSetup) -> None:
         """Setup the client with task manager and event queues.
@@ -452,16 +516,6 @@ class VonageClient:
 
         await self._sdk_subscribe(stream, params)
 
-    @staticmethod
-    def vonage_image_format(pipecat_format: str) -> str:
-        """Normalize Pipecat image format to Vonage format."""
-        return PIPECAT_TO_VONAGE_FORMAT_MAP.get(pipecat_format, pipecat_format)
-
-    @staticmethod
-    def pipecat_image_format(vonage_format: str) -> str:
-        """Normalize Vonage image format to Pipecat format."""
-        return VONAGE_TO_PIPECAT_FORMAT_MAP.get(vonage_format, vonage_format)
-
     async def write_video(self, frame: OutputImageRawFrame) -> bool:
         """Write a video frame to the transport.
 
@@ -471,18 +525,33 @@ class VonageClient:
         if not self._check_image_data(frame):
             return False
 
-        processed_frame = self._process_video_if_needed(frame)
+        parsed_from_pipecat_format = _to_enum(frame.format, PipecatImageFormat)
+        if frame.format and not parsed_from_pipecat_format:
+            logger.error(f"Unsupported Pipecat image format: {frame.format}")
+            return False
+        from_pipecat_format: PipecatImageFormat = (
+            parsed_from_pipecat_format or self._out_pipecat_format
+        )
+        from_std_format = PIPECAT_TO_STANDARD_FORMAT_MAP[from_pipecat_format]
+
+        processed_image = image_colorspace_conversion(
+            frame.image,
+            size=frame.size,
+            from_format=from_std_format,
+            to_format=self._video_out_color_format,
+        )
+        if not processed_image:
+            logger.error(
+                f"Could not convert image from {from_std_format} to {self._video_out_color_format}"
+            )
+            return False
 
         return self._client.add_video(
             VideoFrame(
-                frame_buffer=memoryview(processed_frame.image).cast("B"),
-                resolution=VideoResolution(
-                    width=processed_frame.size[0], height=processed_frame.size[1]
-                ),
-                format=self.vonage_image_format(
-                    processed_frame.format or self._params.video_out_color_format
-                ),
-            )
+                frame_buffer=memoryview(processed_image).cast("B"),
+                resolution=VideoResolution(width=frame.size[0], height=frame.size[1]),
+                format=str(self._video_out_color_format_vonage),
+            ),
         )
 
     def _check_image_data(self, frame: OutputImageRawFrame) -> bool:
@@ -492,10 +561,10 @@ class VonageClient:
             frame: The OutputImageRawFrame to check.
         """
         res = True
-        if frame.format != self._params.video_out_color_format:
-            logger.error(
-                f"Expected color format {self._params.video_out_color_format}, got {frame.format}"
-            )
+        frame_format = _to_enum(frame.format, PipecatImageFormat)
+
+        if frame_format and frame_format != self._out_pipecat_format:
+            logger.error(f"Expected color format {self._out_pipecat_format}, got {frame_format}")
             res = False
         if (
             frame.size[0] != self._params.video_out_width
@@ -542,7 +611,7 @@ class VonageClient:
                                 height=self._params.video_out_height,
                             ),
                             fps=self._params.video_out_framerate,
-                            format=self.vonage_image_format(self._params.video_out_color_format),
+                            format=self._video_out_color_format_vonage,
                         ),
                     ),
                     enable_migration=self._params.session_enable_migration,
@@ -932,19 +1001,38 @@ class VonageClient:
     def _on_subscriber_video_data_cb(self, subscriber: Subscriber, frame: VideoFrame) -> None:
         """Callback for incoming per stream data for all the subscribers in the session."""
         # we need to keep a copy of the audio data as it is a memory view and it will be lost when processed async later
-        pipecat_frame = UserImageRawFrame(
-            user_id=subscriber.stream.id,
-            image=frame.frame_buffer.tobytes(),
-            size=(frame.resolution.width, frame.resolution.height),
-            format=self.pipecat_image_format(frame.format),
-        )
+        image = frame.frame_buffer.tobytes()
 
         async def async_cb() -> None:
-            processed_frame = self._process_video_if_needed(pipecat_frame)
+            from_vonage_format = _to_enum(frame.format, VonageImageFormat)
+            if not from_vonage_format:
+                logger.error(f"Unsupported Vonage image format: {frame.format}")
+                return
+
+            from_std_format = VONAGE_TO_STANDARD_FORMAT_MAP[from_vonage_format]
+            to_pipecat_format = VONAGE_TO_PIPECAT_ANALOG_FORMAT_MAP[from_vonage_format]
+            to_std_format = PIPECAT_TO_STANDARD_FORMAT_MAP[to_pipecat_format]
+
+            processed_image = image_colorspace_conversion(
+                image,
+                size=(frame.resolution.width, frame.resolution.height),
+                from_format=from_std_format,
+                to_format=to_std_format,
+            )
+            if not processed_image:
+                logger.error(f"Could not convert image from {from_std_format} to {to_std_format}")
+                return
+
+            pipecat_frame = UserImageRawFrame(
+                user_id=subscriber.stream.id,
+                image=processed_image,
+                size=(frame.resolution.width, frame.resolution.height),
+                format=str(to_pipecat_format),
+            )
 
             await asyncio.gather(
                 *(
-                    listener.on_video_in(subscriber, processed_frame)
+                    listener.on_video_in(subscriber, pipecat_frame)
                     for listener in self._listeners.values()
                 )
             )
@@ -976,20 +1064,6 @@ class VonageClient:
             return processed_audio_frame
         else:
             return audio_frame
-
-    @staticmethod
-    def _process_video_if_needed(frame: TV) -> TV:
-        # this will switch RGB to BGR or BGR to RGB as needed
-        # video coming from Vonage comes as BGR when using RGB format, whereas Pipecat uses RGB
-        video_bytes = frame.image
-        if frame.format == "RGB":
-            np_rgb = np.frombuffer(frame.image, dtype=np.uint8)
-            np_bgr = np_rgb.reshape(frame.size[1], frame.size[0], 3)[:, :, ::-1]
-            bgr_bytes = np_bgr.tobytes()
-            video_bytes = bgr_bytes
-        # TODO(Toni S.): do we need to do any conversion for ARGB?
-
-        return replace(frame, image=video_bytes)
 
 
 class VonageVideoWebrtcInputTransport(BaseInputTransport):
@@ -1421,3 +1495,62 @@ async def process_audio(
     res_audio = process_audio_channels(res_audio, current, target)
 
     return res_audio
+
+
+def image_colorspace_conversion(
+    image: bytes, size: tuple[int, int], from_format: ImageFormat, to_format: ImageFormat
+) -> Optional[bytes]:
+    """Convert image colorspace from one format to another."""
+    match (from_format, to_format):
+        case (fmt1, fmt2) if fmt1 == fmt2:
+            return image
+        case (ImageFormat.RGB, ImageFormat.BGR) | (ImageFormat.BGR, ImageFormat.RGB):
+            np_input = np.frombuffer(image, dtype=np.uint8)
+            np_output = np_input.reshape(size[1], size[0], 3)[:, :, ::-1]
+            return np_output.tobytes()
+        case (ImageFormat.RGBA, ImageFormat.BGRA) | (ImageFormat.BGRA, ImageFormat.RGBA):
+            np_input = np.frombuffer(image, dtype=np.uint8)
+            np_output = np_input.reshape(size[1], size[0], 4)[:, :, [2, 1, 0, 3]]
+            return np_output.tobytes()
+        case (ImageFormat.PLANAR_YUV420, ImageFormat.PACKED_YUV444):
+            # YUV420 (I420) has Y plane of size width*height, U and V planes of size (width/2)*(height/2)
+            # Packed YUV444 interleaves Y, U, V values for each pixel (YUVYUVYUV...)
+            width, height = size
+            y_plane_size = width * height
+            uv_plane_size_420 = (width // 2) * (height // 2)
+
+            np_input = np.frombuffer(image, dtype=np.uint8)
+            y_plane = np_input[:y_plane_size].reshape(height, width)
+            u_plane_420 = np_input[y_plane_size : y_plane_size + uv_plane_size_420].reshape(
+                height // 2, width // 2
+            )
+            v_plane_420 = np_input[
+                y_plane_size + uv_plane_size_420 : y_plane_size + 2 * uv_plane_size_420
+            ].reshape(height // 2, width // 2)
+
+            # Upsample U and V planes by repeating each pixel in 2x2 blocks
+            u_plane_444 = np.repeat(np.repeat(u_plane_420, 2, axis=0), 2, axis=1)
+            v_plane_444 = np.repeat(np.repeat(v_plane_420, 2, axis=0), 2, axis=1)
+
+            # Interleave Y, U, V values for packed format (YUVYUVYUV...)
+            np_output = np.stack([y_plane, u_plane_444, v_plane_444], axis=-1)
+            return np_output.tobytes()
+        case (ImageFormat.PACKED_YUV444, ImageFormat.PLANAR_YUV420):
+            # Packed YUV444 has Y, U, V interleaved (YUVYUVYUV...)
+            # YUV420 (I420) has Y plane of size width*height, U and V planes of size (width/2)*(height/2)
+            width, height = size
+
+            np_input = np.frombuffer(image, dtype=np.uint8).reshape(height, width, 3)
+            y_plane = np_input[:, :, 0].flatten()
+            u_plane_444 = np_input[:, :, 1]
+            v_plane_444 = np_input[:, :, 2]
+
+            # Downsample U and V planes by taking every other pixel (2x2 -> 1 averaging)
+            u_plane_420 = u_plane_444[::2, ::2].reshape(height // 2, width // 2)
+            v_plane_420 = v_plane_444[::2, ::2].reshape(height // 2, width // 2)
+
+            # Concatenate Y, U, V planes
+            np_output = np.concatenate([y_plane, u_plane_420.flatten(), v_plane_420.flatten()])
+            return np_output.tobytes()
+        case _:
+            return None
