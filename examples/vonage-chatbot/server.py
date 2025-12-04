@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 
+import jwt
 from dotenv import load_dotenv
 from loguru import logger
 
@@ -37,8 +39,45 @@ SYSTEM_INSTRUCTION: str = (
 load_dotenv()
 
 
+def generate_opentok_jwt(api_key: str | None, api_secret: str | None) -> str | None:
+    """Generate OpenTok JWT for X-OPENTOK-AUTH, or None if missing creds."""
+    if not api_key or not api_secret:
+        logger.warning(
+            "Vonage example: VONAGE_API_KEY or VONAGE_API_SECRET missing; "
+            "hang-up via OpenTok REST will be disabled."
+        )
+        return None
+
+    now = int(time.time())
+    payload = {
+        "iss": api_key,
+        "ist": "project",
+        "iat": now,
+        "exp": now + 300,  # 5 minutes
+    }
+    return jwt.encode(payload, api_secret, algorithm="HS256")
+
+
 async def run_bot_websocket_server() -> None:
-    serializer = VonageFrameSerializer()
+    # Vonage / OpenTok config for hang-up via force-disconnect REST API
+    project_id = os.getenv("VONAGE_API_KEY")
+    api_secret = os.getenv("VONAGE_API_SECRET")
+    session_id = os.getenv("VONAGE_SESSION_ID")
+
+    opentok_jwt = generate_opentok_jwt(project_id, api_secret)
+
+    # The VonageFrameSerializer uses these values to implement hang-up via:
+    # DELETE /v2/project/{project_id}/session/{session_id}/connection/{connection_id}
+    # NOTE: connection_id is NOT set here; it will be injected at runtime via set_connection_id().
+    serializer = VonageFrameSerializer(
+        VonageFrameSerializer.InputParams(
+            auto_hang_up=True,
+            send_clear_audio_event=True,
+            project_id=project_id,
+            session_id=session_id,
+            jwt=opentok_jwt,
+        )
+    )
 
     ws_transport = VonageAudioConnectorTransport(
         host=WS_HOST,
@@ -100,7 +139,20 @@ async def run_bot_websocket_server() -> None:
     @ws_transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(_transport, _client) -> None:
         logger.info("Client disconnected")
-        await task.cancel()
+
+        # Read the latest connectionId written by connect_and_stream.py
+        load_dotenv(override=True)
+        conn_id = os.getenv("VONAGE_CONNECTION_ID")
+        if conn_id:
+            logger.info(f"Setting serializer connection_id from env: {conn_id}")
+            serializer.set_connection_id(conn_id)
+        else:
+            logger.warning(
+                "VONAGE_CONNECTION_ID is not set in env. "
+                "Vonage hang-up via force-disconnect API will be skipped."
+            )
+
+        await task.cancel()  # This will inject a CancelFrame → serializer triggers hang-up.
 
     @ws_transport.event_handler("on_websocket_ready")
     async def on_websocket_ready(_client) -> None:

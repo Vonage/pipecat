@@ -7,6 +7,7 @@ and connect its audio to your Pipecat WebSocket endpoint.
 import argparse
 import json
 import os
+from pathlib import Path
 from typing import Dict, List
 
 from dotenv import load_dotenv
@@ -33,10 +34,39 @@ def comma_list(s: str | None) -> List[str]:
     return [x.strip() for x in s.split(",")] if s else []
 
 
+def update_env_var(env_path: str | Path, key: str, value: str) -> None:
+    """Create or update KEY=VALUE in a .env-style file."""
+    path = Path(env_path)
+    lines: List[str] = []
+
+    if path.exists():
+        lines = path.read_text().splitlines()
+
+    new_lines: List[str] = []
+    key_prefix = f"{key}="
+    replaced = False
+
+    for line in lines:
+        if line.strip().startswith("#"):
+            new_lines.append(line)
+            continue
+        if line.lstrip().startswith(key_prefix):
+            new_lines.append(f"{key}={value}")
+            replaced = True
+        else:
+            new_lines.append(line)
+
+    if not replaced:
+        new_lines.append(f"{key}={value}")
+
+    path.write_text("\n".join(new_lines) + "\n")
+
+
 # ---- main -------------------------------------------------------------------
 
 
 def main() -> None:
+    # Load client-side env
     load_dotenv()
 
     p = argparse.ArgumentParser(
@@ -116,15 +146,31 @@ def main() -> None:
     print("Connecting audio to WebSocket with options:")
     print(json.dumps(ws_opts, indent=2))
 
-    # Call the Audio Connector (this is equivalent to POST /v2/project/{apiKey}/connect)
+    # Call the Audio Connector (equivalent to POST /v2/project/{apiKey}/connect)
     resp = ot.connect_audio_to_websocket(session_id, token, ws_opts)
 
-    # The SDK returns a small object/dict; print it for visibility
-    try:
-        print("Connect response:", json.dumps(resp, indent=2))
-    except TypeError:
-        # Not JSON-serializable; just repr it
-        print("Connect response:", resp)
+    # Try to get connectionId
+    connection_id = None
+
+    # Extract connectionId from WebSocketAudioConnection object
+    connection_id = getattr(resp, "connectionId", None)
+
+    if connection_id:
+        print(f"\nAudio Connector connectionId: {connection_id}")
+
+        # Write VONAGE_CONNECTION_ID into both client/.env and ../.env (server)
+        script_dir = Path(__file__).resolve().parent
+        client_env = script_dir / ".env"
+        server_env = script_dir.parent / ".env"
+
+        update_env_var(client_env, "VONAGE_CONNECTION_ID", connection_id)
+        update_env_var(server_env, "VONAGE_CONNECTION_ID", connection_id)
+
+        print("Updated VONAGE_CONNECTION_ID in:")
+        print(f"  {client_env}")
+        print(f"  {server_env}")
+    else:
+        print("\nWarning: Could not extract connectionId from Audio Connector response. ")
 
     print("\nSuccess! Your Video session should now stream audio to/from:", args.ws_uri)
 

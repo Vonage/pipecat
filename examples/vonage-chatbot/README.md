@@ -8,28 +8,26 @@ This project streams caller audio to **OpenAI STT**, processes the conversation 
 
 - [Features](#features)
 - [Requirements](#requirements)
-- [Installation](#installation)
-- [Expose Local Server with ngrok](#expose-local-server-with-ngrok)
-- [Configure Vonage Voice)](#configure-vonage-voice)
+- [Installation and Configuration](#installation-and-configuration)
 - [Running the Application](#running-the-application)
 - [Testing the Chatbot](#testing-the-chatbot)
 
 ## Features
 
-- **Real-time WebSocket audio** to/from Vonage over WebSocket
-- **OpenAI-powered pipeline** STT → LLM → TTS pipeline
-- **Silero VAD** for accurate talk-pause detection
-- **Dockerized** for easy deployment
+- **Real-time, bidirectional audio** using WebSockets via Vonage Audio Connector
+- **OpenAI-powered pipeline:** STT → LLM → TTS
+- **Silero VAD** for accurate speech-pause detection
+- **Docker support** for simple deployment and isolation
 
 ## Requirements
 
 - Python **3.10+**
-- A **Vonage account**
-- An **OpenAI API key**
+- A **Vonage(Opentok) account**
+- An **OpenAI API Key**
 - **ngrok** (or any HTTPS tunnel) for local testing
 - Docker (optional)
 
-## Installation
+## Installation and Configuration
 
 1. **Clone the repo and enter it**
 
@@ -48,7 +46,7 @@ This project streams caller audio to **OpenAI STT**, processes the conversation 
 3. **Install Pipecat AI (editable mode)**:
 
     ```sh
-    pip install -e ".[openai,websocket,vonage,silero,runner]"
+    pip install -e ".[openai,websocket,vonage-audio-connector,silero,runner]"
     ```
 
 4. **Install example dependencies**:
@@ -58,45 +56,76 @@ This project streams caller audio to **OpenAI STT**, processes the conversation 
     pip install -r requirements.txt
     ```
 
-5. **Create .env file**:
-
-    Copy the example environment file and update with your settings:
+5. **Create your .env file**:
 
     ```sh
     cp env.example .env
     ```
+    Update .env with your credentials and session ID as mentioned in Steps 6 and 7 below.
 
-6. **Add your OpenAI Key to .env**:
+6. **Create an Opentok/Vonage Session and Publish a Stream**
+    A Session ID is required for the Audio Connector.
+    Note: You can use either Opentok or Vonage platform to create the session. Open the Playground (or your own app) to create a session and publish a stream.
+    Copy the Session ID and set it in `.env` file:
+    ```sh
+    VONAGE_SESSION_ID=<paste-your-session-id-here>
+    ```
+    Always use **credentials from the same project** that created the `sessionId`.
+
+7. **Set the Keys in `.env`**
+    If the session was created using the OpenTok (API key + secret), set the following in your `.env`:
 
     ```sh
+    # OpenAI Key (no quotes)
     OPENAI_API_KEY=sk-proj-xxxxxxxxxxxxxxxxxxxxxxxx
-    # Do not include quotes ("")
+
+    # OpenTok credentials
+    VONAGE_API_KEY=YOUR_API_KEY
+    VONAGE_API_SECRET=YOUR_API_SECRET
+
+    # Session ID created in Step 6
+    VONAGE_SESSION_ID=1_MX4....
+
+    # Leave blank; this is auto-filled after `/connect` API call
+    VONAGE_CONNECTION_ID=...
+
+    ```
+   If the session was created using the Vonage platform (App ID + Private Key), set the following in your `.env`:
+
+    ```sh
+    # Vonage Platform API credentials
+    VONAGE_APPLICATION_ID=YOUR_APPLICATION_ID
+    VONAGE_PRIVATE_KEY=YOUR_PRIVATE_KEY_PATH
+
+    # Session ID created in Step 6
+    VONAGE_SESSION_ID=1_MX4....
+
+    # Leave blank; auto-filled by client.py
+    VONAGE_CONNECTION_ID=...
+
     ```
 
-7. **Install ngrok**:
+8. **Install ngrok**:
 
    Follow the instructions on the [ngrok website](https://ngrok.com/download) to download and install ngrok. You’ll use this to securely expose your local WebSocket server for testing.
 
-## Expose Local Server with ngrok
+9. **Start ngrok to expose the local WebSocket server**:
 
-1. **Start ngrok**:
-
-    In a new terminal, start ngrok to tunnel the local server:
+    **Run in a separate terminal**, start ngrok to tunnel the local server:
 
     ```sh
     ngrok http 8005
-    #Copy the wss URL, e.g. "uri": "wss://<your-ngrok-domain>",
     ```
 
-    You’ll see output like:
+    You will see something like:
 
     ```sh
     Forwarding    https://a5db22f57efa.ngrok-free.app -> http://localhost:8005
     ```
 
-    The https:// address is your public ngrok domain. To create the WebSocket Secure (WSS) URL for Vonage, simply replace https:// with wss://.
+    To form the **WSS** URL, replace https:// with wss://.
 
-    Example:
+    Example like for above Forwarding URL below is the wss:// url:
 
     ```sh
     "websocket": {
@@ -106,34 +135,17 @@ This project streams caller audio to **OpenAI STT**, processes the conversation 
     }
     ```
 
-## Configure Vonage Voice
-1. Open the **Vonage Video API Playground** (or your own application).
-2. Create a new session and publish the stream.
-3. Make a POST request to:
-    ```sh
-    /v2/project/{apiKey}/connect
-    ```
-4. Include the following in the JSON body:
-    - sessionId
-    - token
-    - The WebSocket URI from ngrok (e.g. "wss://a5db22f57efa.ngrok-free.app")
-    - "audioRate": 16000
-    - "bidirectional": true
-5. This connects your Vonage session to your locally running Pipecat WebSocket server through ngrok.
-6. For a working example of the /connect API request, see [Testing the Chatbot](#testing-the-chatbot)
-
 ## Running the Application
 
-Choose one of the following methods to start the chatbot server.
+You can run the Chatbot server using the Python or Docker.
 
 ### Option 1: Run with Python
 
-**Run the Server application**:
-
     ```sh
-    # Ensure you're in the example directory (examples/vonage-chatbot) and your virtual environment is active
+    # Make sure your virtualenv is active and you are inside examples/vonage-chatbot
     python server.py
     ```
+    The server will start on port 8005 and wait for incoming Audio Connector connections.
 
 ### Option 2: Run with Docker
 
@@ -148,10 +160,9 @@ Choose one of the following methods to start the chatbot server.
     docker run -it --rm -p 8005:8005 --env-file examples/vonage-chatbot/.env vonage-chatbot
     ```
 
-The server will start on port 8005. Keep this running while you test with Vonage.
-
 ## Testing the Chatbot
 
-1. Start publishing audio in the Vonage Playground
-2. Follow the examples/vonage-chatbot/client/README.md and run the connect_and_stream.py.
-Once established then speak. Your audio will reach STT → LLM → TTS pipeline and you’ll hear AI-generated voice reply.
+1. Follow the instructions in: `examples/vonage-chatbot/client/README.md`.
+2. Run the client program (`connect_and_stream.py`) to invoke the **/connect API**.
+3. Once the connection is established, begin speaking in the Vonage Video session. Your audio will be forwarded through the Audio Connector to the Pipecat pipeline processed by OpenAI STT → LLM → TTS and the synthesized response will be sent back into the session. 
+4. You will hear the AI’s voice reply in real time, played back as audio from the virtual participant created by the `/connect` API.

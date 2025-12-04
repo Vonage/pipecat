@@ -1,12 +1,13 @@
 # Python Client for Server Testing
 
-This Python client enables automated testing of the **Vonage Pipecat WebSocket server** . It opens a WS connection to your Pipecat endpoint, streams test audio (microphone) and plays back the audio received from the server.
+This Python client allows you to test the **Vonage Pipecat WebSocket server** by calling the Vonage **/connect** API. It creates a virtual Audio Connector participant inside your Vonage Video session, streams audio from the session to your Pipecat pipeline and plays back the generated response in real time.
 
 ## Setup Instructions
 
-1. **Clone the repo and enter it**
+1. **Open the client directory in separate terminal**
+    You do **not** need to clone the repository again.
+    If you already cloned it for the server setup, simply open a new terminal and navigate to:
     ```sh
-    git clone https://github.com/opentok/vonage-pipecat.git
     cd vonage-pipecat/examples/vonage-speech-to-speech/client
     ```
 
@@ -22,16 +23,19 @@ This Python client enables automated testing of the **Vonage Pipecat WebSocket s
     ```
 
 4. **Create .env**:
-    Copy the example environment file and update with your settings:
 
     ```sh
     cp env.example .env
     ```
 
-5. **Start an Opentok Session and Publish a stream**
-    The Session ID is required. 
-    Note: You can use either opentok or vonage platform to create the session. Open the Playground (or your own app) to create a session and publish a stream.
-    Copy the Session ID and set it in `.env` file:
+5. **Use the existing Vonage/Opentok Session from the server setup**
+    During the server setup, you already:
+    1. Created a Vonage/Opentok Video Session
+    2. Published a stream
+    3. Verified audio is flowing inside the session
+    The client does **not** need a new session.
+    The `/connect` API will attach to this existing session.
+    Simply copy the Session ID you used earlier into your `.env` file:
     ```sh
     VONAGE_SESSION_ID=<paste-your-session-id-here>
     ```
@@ -40,62 +44,76 @@ This Python client enables automated testing of the **Vonage Pipecat WebSocket s
     ```sh
     OPENTOK_API_URL=https://api.opentok.com
     ```
-
-    Use the **API key** and **secret** from the **same project** that created the `sessionId`.
-
-6. **Set the Keys in .env**:
+   If you are using Vonage platform, set VONAGE_API_URL in your .env:
     ```sh
-    # Vonage (OpenTok) credentials
+    VONAGE_API_URL=api.vonage.com
+    ```
+
+    **Note:** Ensure you use the **credentials** from the **same project** that created this session. 
+
+6. **Configure credentials and WebSocket settings in `.env`**
+    If you created the session in Opentok platform, set the following in your `.env`:
+    ```sh
+    # OpenTok credentials
     VONAGE_API_KEY=YOUR_API_KEY
     VONAGE_API_SECRET=YOUR_API_SECRET
 
-    # Your Pipecat WebSocket endpoint (ngrok or prod)
+    # WebSocket URL of your Pipecat server (ngrok or production)
     WS_URI=wss://<your-ngrok-domain>
 
-    # Put existing session from playground or app which you want to connect pipecat-ai
+    # Session ID from Step 5
     VONAGE_SESSION_ID=1_MX4....
 
     # API base
     OPENTOK_API_URL=https://api.opentok.com
 
-     # Keep rest as same.
+    # Leave blank — this is auto-filled after `/connect` API call
+    VONAGE_CONNECTION_ID=
+
+    # Keep rest as same.
     ```
    If you created the session in Vonage platform, set the following in your `.env`:
 
     ```sh
-    # Vonage (OpenTok) credentials
+    # Vonage SDK credentials
     VONAGE_APPLICATION_ID=YOUR_APPLICATION_ID
     VONAGE_PRIVATE_KEY=YOUR_PRIVATE_KEY_PATH
-   
-    # Your Pipecat WebSocket endpoint (ngrok or prod)
+
+    # Websocket URL of your Pipecat Server (ngrok or production)
     WS_URI=wss://<your-ngrok-domain>
-   
-    # Put existing session from playground or app which you want to connect pipecat-ai
+
+    # Session ID from Step 5
     VONAGE_SESSION_ID=1_MX4....
-   
+
     # API base
     VONAGE_API_URL=api.vonage.com
-   
-   # Keep rest as same.
+
+    # Leave blank — this is auto-filled after `/connect` API call
+    VONAGE_CONNECTION_ID=
+
+    # Keep rest as same.
     ```
 
-7. **Start your Pipecat WS server**:
-    Make sure the Vonage Pipecat server is running locally and exposes a WS endpoint via ngrok
+7. **Ensure your Pipecat WebSocket Server is running**:
+    Before running the client, ensure Websocket Server is running. The client cannot connect unless the WebSocket endpoint is reachable.
 
-8. **Running the Client**:
-    Below program will connect the opentok session created above to the pipecat-ai pipeline. 
-
-    If you are using the opentok platform, run:
+8. **Run the Client**:
+    The client triggers the `/connect` API → Vonage creates an Audio Connector → audio begins flowing.
+    If using the Opentok API Key + Secret, run:
     ```sh
     python connect_and_stream.py
     ```
-   
-    If you are using the Vonage platform, run:
+
+    If using Vonage Application ID + Private Key, run:
     ```sh
     python connect_and_stream_vonage.py
     ```
+    When successful:
+    1) `VONAGE_CONNECTION_ID` is automatically added to `.env`.
+    2) The caller's audio is streamed into Pipecat
+    3) The AI-generated speech response is injected back into the session
 
-**Note** 
+**Overriding `.env` Values (Optional)**
 The script reads everything from .env via os.getenv().
 You can still override via flags if you want, e.g.:
 
