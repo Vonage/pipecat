@@ -64,8 +64,8 @@ except ModuleNotFoundError as e:
     raise Exception(f"Missing module: {e}")
 
 
-class VonageVideoWebrtcTransportParams(TransportParams):
-    """Parameters for the Vonage WebRTC transport.
+class VonageVideoConnectorTransportParams(TransportParams):
+    """Parameters for the Vonage Video Connector transport.
 
     Parameters:
         publisher_name: Name of the publisher stream.
@@ -240,7 +240,7 @@ class VonageClient:
         application_id: str,
         session_id: str,
         token: str,
-        params: VonageVideoWebrtcTransportParams,
+        params: VonageVideoConnectorTransportParams,
     ):
         """Initialize the Vonage client.
 
@@ -1076,15 +1076,15 @@ class VonageClient:
             return audio_frame
 
 
-class VonageVideoWebrtcInputTransport(BaseInputTransport):
+class VonageVideoConnectorInputTransport(BaseInputTransport):
     """Input transport for Vonage, handling audio input from the Vonage session.
 
     Receives audio from a Vonage Video session and pushes it as input frames.
     """
 
-    _params: VonageVideoWebrtcTransportParams
+    _params: VonageVideoConnectorTransportParams
 
-    def __init__(self, client: VonageClient, params: VonageVideoWebrtcTransportParams):
+    def __init__(self, client: VonageClient, params: VonageVideoConnectorTransportParams):
         """Initialize the Vonage input transport.
 
         Args:
@@ -1200,15 +1200,15 @@ class VonageVideoWebrtcInputTransport(BaseInputTransport):
         await self._client.subscribe_to_stream(stream_id, params)
 
 
-class VonageVideoWebrtcOutputTransport(BaseOutputTransport):
+class VonageVideoConnectorOutputTransport(BaseOutputTransport):
     """Output transport for Vonage, handling audio output to the Vonage session.
 
     Sends audio frames to a Vonage Video session as output.
     """
 
-    _params: VonageVideoWebrtcTransportParams
+    _params: VonageVideoConnectorTransportParams
 
-    def __init__(self, client: VonageClient, params: VonageVideoWebrtcTransportParams):
+    def __init__(self, client: VonageClient, params: VonageVideoConnectorTransportParams):
         """Initialize the Vonage output transport.
 
         Args:
@@ -1341,8 +1341,8 @@ class VonageVideoWebrtcOutputTransport(BaseOutputTransport):
             )
 
 
-class VonageVideoWebrtcTransport(BaseTransport):
-    """Vonage WebRTC transport implementation for Pipecat.
+class VonageVideoConnectorTransport(BaseTransport):
+    """Vonage Video Connector transport implementation for Pipecat.
 
     Provides input and output audio transport for Vonage Video sessions, supporting event handling
     for session and participant lifecycle.
@@ -1355,16 +1355,16 @@ class VonageVideoWebrtcTransport(BaseTransport):
     - Configurable audio and migration parameters
     """
 
-    _params: VonageVideoWebrtcTransportParams
+    _params: VonageVideoConnectorTransportParams
 
     def __init__(
         self,
         application_id: str,
         session_id: str,
         token: str,
-        params: VonageVideoWebrtcTransportParams,
+        params: VonageVideoConnectorTransportParams,
     ):
-        """Initialize the Vonage WebRTC transport.
+        """Initialize the Vonage Video Connector transport.
 
         Args:
             application_id: The Vonage Video application ID.
@@ -1399,28 +1399,28 @@ class VonageVideoWebrtcTransport(BaseTransport):
             )
         )
 
-        self._input: Optional[VonageVideoWebrtcInputTransport] = None
-        self._output: Optional[VonageVideoWebrtcOutputTransport] = None
+        self._input: Optional[VonageVideoConnectorInputTransport] = None
+        self._output: Optional[VonageVideoConnectorOutputTransport] = None
         self._one_stream_received: bool = False
 
     def input(self) -> FrameProcessor:
         """Get the input transport for Vonage.
 
         Returns:
-            The VonageVideoWebrtcInputTransport instance.
+            The VonageVideoConnectorInputTransport instance.
         """
         if not self._input:
-            self._input = VonageVideoWebrtcInputTransport(self._client, self._params)
+            self._input = VonageVideoConnectorInputTransport(self._client, self._params)
         return self._input
 
     def output(self) -> FrameProcessor:
         """Get the output transport for Vonage.
 
         Returns:
-            The VonageVideoWebrtcOutputTransport instance.
+            The VonageVideoConnectorOutputTransport instance.
         """
         if not self._output:
-            self._output = VonageVideoWebrtcOutputTransport(self._client, self._params)
+            self._output = VonageVideoConnectorOutputTransport(self._client, self._params)
         return self._output
 
     async def subscribe_to_stream(self, stream_id: str, params: SubscribeSettings) -> None:

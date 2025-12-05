@@ -1,5 +1,5 @@
 # Copyright 2025 Vonage
-"""Example of using AWS Nova Sonic LLM service with Vonage Video WebRTC transport."""
+"""Example of using AWS Nova Sonic LLM service with Vonage Video Connector transport."""
 
 import asyncio
 import json
@@ -17,9 +17,9 @@ from pipecat.pipeline.task import PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.services import aws_nova_sonic
 from pipecat.services.aws_nova_sonic.aws import AWSNovaSonicLLMService
-from pipecat.transports.vonage.video_webrtc import (
-    VonageVideoWebrtcTransport,
-    VonageVideoWebrtcTransportParams,
+from pipecat.transports.vonage.video_connector import (
+    VonageVideoConnectorTransport,
+    VonageVideoConnectorTransportParams,
 )
 
 logger.remove(0)
@@ -27,7 +27,7 @@ logger.add(sys.stderr, level="DEBUG")
 
 
 async def main(session_str: str):
-    """Main entry point for the nova sonic vonage video webrtc example."""
+    """Main entry point for the nova sonic vonage video connector example."""
     system_instruction = (
         "You are a friendly assistant. The user and you will engage in a spoken dialog exchanging "
         "the transcripts of a natural real-time conversation. Keep your responses short, generally "
@@ -43,11 +43,11 @@ async def main(session_str: str):
     session_id = session_obj.get("sessionId", "")
     token = session_obj.get("token", "")
 
-    transport = VonageVideoWebrtcTransport(
+    transport = VonageVideoConnectorTransport(
         application_id,
         session_id,
         token,
-        VonageVideoWebrtcTransportParams(
+        VonageVideoConnectorTransportParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
             vad_analyzer=SileroVADAnalyzer(),
@@ -111,7 +111,7 @@ async def main(session_str: str):
 
 
 def cli_main():
-    """Console script entry point for the nova sonic vonage video webrtc example."""
+    """Console script entry point for the nova sonic vonage video connector example."""
     if len(sys.argv) > 1:
         session_str = sys.argv[1]
         logger.info(f"Session str: {session_str}")
