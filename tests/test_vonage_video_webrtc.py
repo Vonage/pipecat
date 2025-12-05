@@ -197,6 +197,13 @@ class SubscriberCallbacks:
     on_render_frame_cb: Callable[[MockSubscriber, MockVideoFrame], None]
 
 
+@dataclass(frozen=True)
+class ConnectCallbacks:
+    on_error_cb: Callable[[MockSession, str, int], None]
+    on_disconnected_cb: Callable[[MockSession], None]
+    on_ready_for_audio_cb: Callable[[MockSession], None]
+
+
 class TestVonageVideoWebrtcTransport:
     """Test cases for Vonage Video WebRTC transport classes."""
 
@@ -221,6 +228,7 @@ class TestVonageVideoWebrtcTransport:
         self._executor = ThreadPoolExecutor(max_workers=1)
 
         # subscriber state
+        self._connect_callbacks: Optional[ConnectCallbacks] = None
         self._subscriber_callbacks: dict[str, SubscriberCallbacks] = {}
 
     def _get_frame_processor_setup(self) -> FrameProcessorSetup:
@@ -325,14 +333,24 @@ class TestVonageVideoWebrtcTransport:
         client.remove_listener(listener_id)
         assert listener_id not in client._listeners
 
-    def _setup_audio_ready_callback(self, client: VonageClient) -> None:
+    def _setup_audio_ready_callback(self, client: VonageClient, call_ready_for_audio: bool) -> None:
         """Helper to set up the audio ready callback."""
 
         def connect_side_effect(
-            *_: Any, on_ready_for_audio_cb: Optional[Callable[[Any], None]] = None, **__: Any
+            *_: Any,
+            on_error_cb: Callable[[MockSession, str, int], None],
+            on_disconnected_cb: Callable[[MockSession], None],
+            on_ready_for_audio_cb: Callable[[MockSession], None],
+            **__: Any,
         ) -> bool:
-            assert on_ready_for_audio_cb is not None
-            on_ready_for_audio_cb(vonage_video_mock.models.Session(id="session"))
+            if call_ready_for_audio:
+                on_ready_for_audio_cb(vonage_video_mock.models.Session(id="session"))
+
+            self._connect_callbacks = ConnectCallbacks(
+                on_error_cb=on_error_cb,
+                on_disconnected_cb=on_disconnected_cb,
+                on_ready_for_audio_cb=on_ready_for_audio_cb,
+            )
             return True
 
         self.mock_client_instance.connect = MagicMock(side_effect=connect_side_effect)
@@ -379,10 +397,7 @@ class TestVonageVideoWebrtcTransport:
         params = params or VonageVideoWebrtcTransportParams()
         client = self.VonageClient(self.application_id, self.session_id, self.token, params)
         if setup_connect_mock:
-            if params.audio_in_enabled:
-                self._setup_audio_ready_callback(client)
-            else:
-                self.mock_client_instance.connect.return_value = True
+            self._setup_audio_ready_callback(client, call_ready_for_audio=True)
 
         self._setup_subscriber_callbacks(client)
 
@@ -548,8 +563,7 @@ class TestVonageVideoWebrtcTransport:
         listener = self.VonageClientListener()
         listener.on_connected = AsyncMock()
         # only set this callback if we have audio enabled
-        if has_audio:
-            self._setup_audio_ready_callback(client)
+        self._setup_audio_ready_callback(client, has_audio)
         listener_id = client.add_listener(listener)
         await client.connect()
 
@@ -583,11 +597,14 @@ class TestVonageVideoWebrtcTransport:
             enable_migration=params.session_enable_migration,
             logging=MockLoggingSettings(level="INFO"),
         )
+        assert self._connect_callbacks is not None
         assert call_args[1]["on_audio_data_cb"] == client._on_session_audio_data_cb
-        assert call_args[1]["on_error_cb"] == client._on_session_error_cb
+        assert call_args[1]["on_error_cb"] == self._connect_callbacks.on_error_cb
         assert call_args[1]["on_connected_cb"] == client._on_session_connected_cb
-        assert call_args[1]["on_disconnected_cb"] == client._on_session_disconnected_cb
-        assert call_args[1]["on_ready_for_audio_cb"] is not None
+        assert call_args[1]["on_disconnected_cb"] == self._connect_callbacks.on_disconnected_cb
+        assert (
+            call_args[1]["on_ready_for_audio_cb"] == self._connect_callbacks.on_ready_for_audio_cb
+        )
         assert call_args[1]["on_stream_received_cb"] == client._on_stream_received_cb
         assert call_args[1]["on_stream_dropped_cb"] == client._on_stream_dropped_cb
 
@@ -1549,7 +1566,7 @@ class TestVonageVideoWebrtcTransport:
 
         # Mock the connect method to return True
         self.mock_client_instance.connect.return_value = True
-        self._setup_audio_ready_callback(client)
+        self._setup_audio_ready_callback(client, call_ready_for_audio=True)
         self._setup_subscriber_callbacks(client)
 
         # create a listener
@@ -1572,12 +1589,14 @@ class TestVonageVideoWebrtcTransport:
         # connect
         await client.connect()
 
+        assert self._connect_callbacks is not None
+
         # Test _on_session_error_cb triggers on_error
         session = vonage_video_mock.models.Session(id="test_session")
         error_description = "Test error description"
         error_code = 500
 
-        client._on_session_error_cb(session, error_description, error_code)
+        self._connect_callbacks.on_error_cb(session, error_description, error_code)
         await self._wait_for_condition(lambda: on_error_mock.await_count > 0)
 
         listener.on_error.assert_called_once_with(session, error_description, error_code)
