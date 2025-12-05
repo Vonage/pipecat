@@ -554,6 +554,7 @@ class TestVonageVideoConnectorTransport:
         params.audio_out_enabled = has_audio
         params.video_in_enabled = has_video
         params.video_out_enabled = has_video
+        params.video_connector_log_level = "WARN" if has_audio else "ERROR"
 
         client = await self._create_client(params)
 
@@ -595,7 +596,7 @@ class TestVonageVideoConnectorTransport:
                 ),
             ),
             enable_migration=params.session_enable_migration,
-            logging=MockLoggingSettings(level="INFO"),
+            logging=MockLoggingSettings(level=params.video_connector_log_level),
         )
         assert self._connect_callbacks is not None
         assert call_args[1]["on_audio_data_cb"] == client._on_session_audio_data_cb

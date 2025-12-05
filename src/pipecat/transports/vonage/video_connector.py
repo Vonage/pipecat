@@ -84,6 +84,7 @@ class VonageVideoConnectorTransportParams(TransportParams):
     session_enable_migration: bool = False
     audio_in_auto_subscribe: bool = True
     video_in_auto_subscribe: bool = False
+    video_connector_log_level: str = "INFO"
     video_in_preferred_resolution: Optional[tuple[int, int]] = None
     video_in_preferred_framerate: Optional[int] = None
     clear_buffers_on_interruption: bool = True
@@ -660,7 +661,7 @@ class VonageClient:
                         ),
                     ),
                     enable_migration=self._params.session_enable_migration,
-                    logging=LoggingSettings(level="INFO"),
+                    logging=LoggingSettings(level=self._params.video_connector_log_level),
                 ),
                 on_error_cb=on_session_error_cb,
                 on_connected_cb=self._on_session_connected_cb,
