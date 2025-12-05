@@ -2041,6 +2041,48 @@ class TestVonageVideoConnectorTransport:
             clear_buffers_mock.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_vonage_output_transport_interruption_with_clear_buffers_disabled(self) -> None:
+        """Test VonageVideoConnectorOutputTransport with clear_buffers_on_interruption=False."""
+        transport = await self._create_output_transport(
+            params=self.VonageVideoConnectorTransportParams(
+                audio_out_enabled=True, clear_buffers_on_interruption=False
+            )
+        )
+        client = transport._client
+
+        with (
+            patch.object(client, "clear_media_buffers") as clear_buffers_mock,
+            patch.object(client, "connect", AsyncMock()),
+        ):
+            await transport.start(StartFrame())
+            interruption_frame = InterruptionFrame()
+            await transport.process_frame(interruption_frame, FrameDirection.DOWNSTREAM)
+
+            # Verify clear_media_buffers was NOT called when clear_buffers_on_interruption is False
+            clear_buffers_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_vonage_output_transport_interruption_with_clear_buffers_enabled(self) -> None:
+        """Test VonageVideoConnectorOutputTransport with clear_buffers_on_interruption=True (default)."""
+        transport = await self._create_output_transport(
+            params=self.VonageVideoConnectorTransportParams(
+                audio_out_enabled=True, clear_buffers_on_interruption=True
+            )
+        )
+        client = transport._client
+
+        with (
+            patch.object(client, "clear_media_buffers") as clear_buffers_mock,
+            patch.object(client, "connect", AsyncMock()),
+        ):
+            await transport.start(StartFrame())
+            interruption_frame = InterruptionFrame()
+            await transport.process_frame(interruption_frame, FrameDirection.DOWNSTREAM)
+
+            # Verify clear_media_buffers was called when clear_buffers_on_interruption is True
+            clear_buffers_mock.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_vonage_transport_initialization(self) -> None:
         """Test VonageVideoConnectorTransport initialization."""
         params = self.VonageVideoConnectorTransportParams(

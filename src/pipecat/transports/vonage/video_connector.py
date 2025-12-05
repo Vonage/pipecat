@@ -76,6 +76,7 @@ class VonageVideoConnectorTransportParams(TransportParams):
         video_in_preferred_width: Preferred width for video input capture.
         video_in_preferred_height: Preferred height for video input capture.
         video_in_preferred_framerate: Preferred framerate for video input capture.
+        clear_buffers_on_interruption: Whether to clear media buffers when an interruption frame is received.
     """
 
     publisher_name: str = ""
@@ -85,6 +86,7 @@ class VonageVideoConnectorTransportParams(TransportParams):
     video_in_auto_subscribe: bool = False
     video_in_preferred_resolution: Optional[tuple[int, int]] = None
     video_in_preferred_framerate: Optional[int] = None
+    clear_buffers_on_interruption: bool = True
 
 
 @dataclass
@@ -1276,7 +1278,11 @@ class VonageVideoConnectorOutputTransport(BaseOutputTransport):
         await super().process_frame(frame, direction)
 
         # if we get an interruption frame, we need to ensure the buffers inside Vonage Video Connector are cleared
-        if self._connected and isinstance(frame, InterruptionFrame):
+        if (
+            self._connected
+            and isinstance(frame, InterruptionFrame)
+            and self._params.clear_buffers_on_interruption
+        ):
             logger.info("Clearing Vonage media buffers due to interruption frame")
             self._client.clear_media_buffers()
 
