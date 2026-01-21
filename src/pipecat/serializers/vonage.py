@@ -1,315 +1,181 @@
-# SPDX-License-Identifier: BSD-2-Clause
-"""Vonage WebSocket serializer (WAV+pydub resample, fixed-size chunking).
+#
+# Copyright (c) 2024–2025, Daily
+#
+# SPDX-License-Identifier: BSD 2-Clause License
+#
 
-Note: DTMF is intentionally not implemented because Vonage Audio Connector
-does not expose DTMF events over the WebSocket protocol.
-"""
+"""Vonage Audio Connector WebSocket serializer for Pipecat."""
 
-from __future__ import annotations
-
-import io
 import json
-import wave
-from typing import List, Optional, Union
+from typing import Optional
 
 from loguru import logger
 from pydantic import BaseModel
-from pydub import AudioSegment
 
+from pipecat.audio.dtmf.types import KeypadEntry
 from pipecat.audio.utils import create_stream_resampler
 from pipecat.frames.frames import (
-    CancelFrame,
-    EndFrame,
+    AudioRawFrame,
     Frame,
     InputAudioRawFrame,
-    OutputAudioRawFrame,
+    InputDTMFFrame,
+    InterruptionFrame,
+    OutputTransportMessageFrame,
+    OutputTransportMessageUrgentFrame,
     StartFrame,
-    StartInterruptionFrame,
 )
-from pipecat.serializers.base_serializer import FrameSerializer, FrameSerializerType
-
-# ---- Audio/timing constants --------------------------------------------------
-
-AUDIO_TARGET_RATE_HZ: int = 16_000  # 16 kHz target
-AUDIO_CHANNELS_MONO: int = 1  # mono
-PCM16_SAMPLE_WIDTH_BYTES: int = 2  # 16-bit PCM
-CHUNK_DURATION_MS: int = 20  # telephony frame
-SECONDS_PER_MS: float = 1.0 / 1_000.0
-CHUNK_PERIOD_SECONDS: float = CHUNK_DURATION_MS * SECONDS_PER_MS
-SLEEP_INTERVAL_PER_CHUNK: float = 0.01
-
-BYTES_PER_SAMPLE_MONO: int = AUDIO_CHANNELS_MONO * PCM16_SAMPLE_WIDTH_BYTES
-BYTES_PER_CHUNK: int = int(AUDIO_TARGET_RATE_HZ * CHUNK_PERIOD_SECONDS) * BYTES_PER_SAMPLE_MONO
+from pipecat.serializers.base_serializer import FrameSerializer
 
 
 class VonageFrameSerializer(FrameSerializer):
-    """Produces 16 kHz mono PCM chunks; resamples using WAV+pydub path."""
+    """Serializer for Vonage Video API Audio Connector WebSocket protocol.
+
+    This serializer converts between Pipecat frames and the Vonage Audio Connector
+    WebSocket streaming protocol.
+
+    Note:
+        Ref docs: https://developer.vonage.com/en/video/guides/audio-connector
+    """
 
     class InputParams(BaseModel):
-        """Configuration options for the Vonage frame serializer.
+        """Configuration parameters for VonageFrameSerializer.
 
-        Controls whether to send a clear-audio event and whether
-        to auto-hang-up on End/Cancel frames.
-
-        Hang-up configuration:
-
-        - api_base_url:    Base URL for the OpenTok API.
-                           Default: "https://api.opentok.com"
-        - project_id:      OpenTok project / API key (used in the URL path).
-        - session_id:      OpenTok session ID.
-        - connection_id:   Connection ID of the Audio Connector WebSocket connection.
-                           May be set at construction time *or later* via
-                           VonageFrameSerializer.set_connection_id().
-        - jwt:             JWT for OpenTok, used in X-OPENTOK-AUTH header.
+        Parameters:
+            vonage_sample_rate: Sample rate used by Vonage, defaults to 16000 Hz.
+                Common values: 8000, 16000, 24000 Hz.
+            sample_rate: Optional override for pipeline input sample rate.
         """
 
-        auto_hang_up: bool = True
-        send_clear_audio_event: bool = True
+        vonage_sample_rate: int = 16000
+        sample_rate: Optional[int] = None
 
-        api_base_url: str = "https://api.opentok.com"
-        project_id: Optional[str] = None
-        session_id: Optional[str] = None
-        connection_id: Optional[str] = None
-        jwt: Optional[str] = None
-
-    def __init__(self, params: Optional[InputParams] = None) -> None:
+    def __init__(self, params: Optional[InputParams] = None):
         """Initialize the VonageFrameSerializer.
 
         Args:
-            params: Optional configuration parameters for serialization.
+            params: Configuration parameters.
         """
-        self._params: VonageFrameSerializer.InputParams = (
-            params or VonageFrameSerializer.InputParams()
-        )
-        self._sample_rate_hz: int = AUDIO_TARGET_RATE_HZ
-        self._in_resampler = create_stream_resampler()
+        self._params = params or VonageFrameSerializer.InputParams()
 
-        # Transport reads this for pacing (one sleep per chunk).
-        self.sleep_interval: float = SLEEP_INTERVAL_PER_CHUNK
+        self._vonage_sample_rate = self._params.vonage_sample_rate
+        self._sample_rate = 0  # Pipeline input rate
 
-        # Serializer-side audio format assumptions for pydub path:
-        self._channels: int = AUDIO_CHANNELS_MONO
-        self._sample_width_bytes: int = PCM16_SAMPLE_WIDTH_BYTES
+        self._input_resampler = create_stream_resampler()
+        self._output_resampler = create_stream_resampler()
 
-        # Ensure we only attempt hang-up once
-        self._hangup_attempted: bool = False
-
-        # Warn early if auto_hang_up is enabled but core config is incomplete.
-        # NOTE: connection_id is intentionally NOT required here, because in
-        # the Vonage Audio Connector flow it may only be known after
-        # connect_audio_to_websocket() runs. It can be set later with
-        # set_connection_id().
-        if self._params.auto_hang_up:
-            missing = [
-                name
-                for name, value in (
-                    ("project_id", self._params.project_id),
-                    ("session_id", self._params.session_id),
-                    ("jwt", self._params.jwt),
-                )
-                if not value
-            ]
-            if missing:
-                logger.warning(
-                    "VonageFrameSerializer: auto_hang_up is enabled but the following "
-                    f"fields are not configured: {', '.join(missing)}. "
-                    "Hang-up requests will be skipped until these are provided."
-                )
-
-    # ---- public properties / setters ----------------------------------------
-
-    @property
-    def connection_id(self) -> Optional[str]:
-        """Current OpenTok connection ID."""
-        return self._params.connection_id
-
-    def set_connection_id(self, connection_id: str) -> None:
-        """Set or update the OpenTok connection ID.
-
-        This is useful in flows where the Audio Connector connectionId is
-        only known after calling /connect in separate component or script.
-        """
-        self._params.connection_id = connection_id
-        logger.debug(
-            "VonageFrameSerializer: connection_id updated to %r",
-            connection_id,
-        )
-
-    @property
-    def type(self) -> FrameSerializerType:
-        """Return the serializer type (binary frames)."""
-        return FrameSerializerType.BINARY
-
-    async def setup(self, frame: StartFrame) -> None:
-        """Prepare the serializer for a new session.
-
-        Sets the sample rate and sleep interval for chunk pacing.
-        """
-        self._sample_rate_hz = AUDIO_TARGET_RATE_HZ
-        self.sleep_interval = SLEEP_INTERVAL_PER_CHUNK
-
-    # --- helpers --------------------------------------------------------------
-
-    @staticmethod
-    def _resample_audio_with_pydub(
-        data: bytes,
-        src_rate_hz: int,
-        num_channels: int,
-        sample_width_bytes: int,
-        target_rate_hz: int,
-    ) -> bytes:
-        """Resample via WAV header + pydub.
-
-        NOTE: This assumes `data` contains a WAV header. If your pipeline disables
-        WAV headers, switch to a raw-PCM resampler instead.
-        """
-        with wave.open(io.BytesIO(data), "rb") as wf:
-            num_frames = wf.getnframes()
-            pcm_data = wf.readframes(num_frames)
-
-        segment = AudioSegment.from_raw(
-            io.BytesIO(pcm_data),
-            sample_width=sample_width_bytes,
-            frame_rate=src_rate_hz,
-            channels=num_channels,
-        )
-        resampled = (
-            segment.set_channels(num_channels)
-            .set_sample_width(sample_width_bytes)
-            .set_frame_rate(target_rate_hz)
-        )
-        return resampled.raw_data
-
-    @staticmethod
-    def _split_into_chunks(audio16: bytes) -> List[bytes]:
-        return [audio16[i : i + BYTES_PER_CHUNK] for i in range(0, len(audio16), BYTES_PER_CHUNK)]
-
-    async def _hang_up_call(self) -> None:
-        """Hang up the call using OpenTok 'force disconnect' REST API."""
-        params = self._params
-
-        missing = [
-            name
-            for name, value in (
-                ("project_id", params.project_id),
-                ("session_id", params.session_id),
-                ("connection_id", params.connection_id),
-                ("jwt", params.jwt),
-            )
-            if not value
-        ]
-        if missing:
-            logger.warning(
-                "VonageFrameSerializer: requested hang-up, but missing required "
-                f"OpenTok fields: {', '.join(missing)}. Skipping hang-up."
-            )
-            return
-
-        base_url = params.api_base_url.rstrip("/")
-        endpoint = (
-            f"{base_url}/v2/project/{params.project_id}"
-            f"/session/{params.session_id}/connection/{params.connection_id}"
-        )
-
-        headers = {
-            "X-OPENTOK-AUTH": params.jwt,
-        }
-
-        logger.info(
-            "VonageFrameSerializer: calling force disconnect "
-            f"endpoint={endpoint}, jwt_present={bool(headers.get('X-OPENTOK-AUTH'))}, "
-            f"connection_id={params.connection_id}"
-        )
-
-        try:
-            import aiohttp
-
-            async with aiohttp.ClientSession() as session:
-                async with session.delete(endpoint, headers=headers) as resp:
-                    text = await resp.text()
-                    if 200 <= resp.status < 300:
-                        logger.info(
-                            "VonageFrameSerializer: successfully requested force disconnect "
-                            f"for connection {params.connection_id} (status={resp.status})."
-                        )
-                    elif resp.status == 404:
-                        logger.debug(
-                            "VonageFrameSerializer: connection already disconnected or not found "
-                            f"(connection_id={params.connection_id}, status=404)."
-                        )
-                    else:
-                        logger.error(
-                            "VonageFrameSerializer: force disconnect request failed "
-                            f"(status={resp.status}): {text}"
-                        )
-        except Exception as exc:
-            logger.exception(
-                f"VonageFrameSerializer: error while calling OpenTok force disconnect: {exc}"
-            )
-
-    # --- API ------------------------------------------------------------------
-
-    async def serialize(self, frame: Frame) -> Optional[Union[str, bytes, list[bytes]]]:
-        """Convert a Frame into one or more serialized payloads.
+    async def setup(self, frame: StartFrame):
+        """Sets up the serializer with pipeline configuration.
 
         Args:
-            frame: The frame to serialize.
-
-        Returns:
-            The serialized data as a string, bytes, or list of bytes.
+            frame: The StartFrame containing pipeline configuration.
         """
-        # --- Hang-up handling on End/Cancel ----------------------------------
-        if isinstance(frame, (EndFrame, CancelFrame)):
-            if self._params.auto_hang_up and not self._hangup_attempted:
-                self._hangup_attempted = True
-                logger.debug("VonageFrameSerializer: End/Cancel observed, triggering hang-up.")
-                await self._hang_up_call()
-            else:
-                logger.debug(
-                    "VonageFrameSerializer: End/Cancel observed; "
-                    "auto_hang_up disabled or already attempted."
-                )
-            # No payload needs to be sent to the WebSocket for End/Cancel.
-            return None
+        self._sample_rate = self._params.sample_rate or frame.audio_in_sample_rate
 
-        # --- Interruption handling ------------------------------------------
-        if isinstance(frame, StartInterruptionFrame) and self._params.send_clear_audio_event:
-            return json.dumps({"event": "clearAudio"})
+    async def serialize(self, frame: Frame) -> str | bytes | None:
+        """Serializes a Pipecat frame to Vonage WebSocket format.
 
-        # --- Outbound audio --------------------------------------------------
-        if isinstance(frame, OutputAudioRawFrame):
-            audio16 = self._resample_audio_with_pydub(
-                data=frame.audio,
-                src_rate_hz=frame.sample_rate,
-                num_channels=self._channels,
-                sample_width_bytes=self._sample_width_bytes,
-                target_rate_hz=self._sample_rate_hz,
-            )
-            return self._split_into_chunks(audio16)
-
-        logger.debug(f"VonageFrameSerializer: ignoring frame type {type(frame).__name__}.")
-        return None
-
-    async def deserialize(self, data: Union[str, bytes]) -> Optional[Frame]:
-        """Convert serialized input data into a Frame.
+        Handles conversion of various frame types to Vonage WebSocket messages.
 
         Args:
-            data: The raw audio or frame payload.
+            frame: The Pipecat frame to serialize.
 
         Returns:
-            The corresponding Frame instance, or None if parsing fails.
+            Serialized data as string (JSON commands) or bytes (audio), or None if the frame isn't handled.
         """
-        # Binary = audio frame from Audio Connector (16-bit PCM, 16 kHz)
-        if isinstance(data, (bytes, bytearray)):
-            audio = await self._in_resampler.resample(
-                bytes(data), self._sample_rate_hz, self._sample_rate_hz
-            )
-            return InputAudioRawFrame(
-                audio=audio,
-                num_channels=AUDIO_CHANNELS_MONO,
-                sample_rate=self._sample_rate_hz,
-            )
+        if isinstance(frame, InterruptionFrame):
+            # Clear the audio buffer to stop playback immediately
+            answer = {"action": "clear"}
+            return json.dumps(answer)
+        elif isinstance(frame, AudioRawFrame):
+            data = frame.audio
 
-        # Text messages (websocket:connected / websocket:media:update / websocket:disconnected)
-        logger.info("VonageFrameSerializer: ignoring non-binary inbound data.")
+            # Output: Convert PCM at frame's rate to Vonage's sample rate (16-bit linear PCM)
+            serialized_data = await self._output_resampler.resample(
+                data, frame.sample_rate, self._vonage_sample_rate
+            )
+            if serialized_data is None or len(serialized_data) == 0:
+                # Ignoring in case we don't have audio
+                return None
+
+            # Vonage expects raw binary PCM data (not base64 encoded)
+            return serialized_data
+        elif isinstance(frame, (OutputTransportMessageFrame, OutputTransportMessageUrgentFrame)):
+            # Allow sending custom JSON commands (e.g., notify)
+            return json.dumps(frame.message)
+
         return None
+
+    async def deserialize(self, data: str | bytes) -> Frame | None:
+        """Deserializes Vonage WebSocket data to Pipecat frames.
+
+        Handles conversion of Vonage events to appropriate Pipecat frames.
+        - Binary messages contain audio data (16-bit linear PCM)
+        - Text messages contain JSON events (websocket:connected, websocket:cleared, dtmf, etc.)
+
+        Args:
+            data: The raw WebSocket data from Vonage.
+
+        Returns:
+            A Pipecat frame corresponding to the Vonage event, or None if unhandled.
+        """
+        # Check if this is binary audio data
+        if isinstance(data, bytes):
+            # Binary message = audio data (16-bit linear PCM)
+            payload = data
+
+            # Input: Convert Vonage's PCM audio to pipeline sample rate
+            deserialized_data = await self._input_resampler.resample(
+                payload,
+                self._vonage_sample_rate,
+                self._sample_rate,
+            )
+            if deserialized_data is None or len(deserialized_data) == 0:
+                # Ignoring in case we don't have audio
+                return None
+
+            audio_frame = InputAudioRawFrame(
+                audio=deserialized_data,
+                num_channels=1,  # Vonage uses mono audio
+                sample_rate=self._sample_rate,  # Use the configured pipeline input rate
+            )
+            return audio_frame
+        else:
+            # Text message = JSON event
+            try:
+                message = json.loads(data)
+                event = message.get("event")
+
+                # Handle different event types
+                if event == "websocket:connected":
+                    logger.debug(
+                        f"Vonage WebSocket connected: content-type={message.get('content-type')}"
+                    )
+                    return None
+                elif event == "websocket:cleared":
+                    logger.debug("Vonage audio buffer cleared")
+                    return None
+                elif event == "websocket:notify":
+                    logger.debug(f"Vonage notify event: {message.get('payload')}")
+                    return None
+                elif event == "websocket:dtmf":
+                    # Handle DTMF input
+                    # Vonage may send digit in different formats, try both
+                    digit = message.get("digit") or message.get("dtmf", {}).get("digit")
+                    if digit is None:
+                        logger.warning(f"DTMF event received but no digit found: {message}")
+                        return None
+
+                    digit = str(digit)
+                    logger.debug(f"Received DTMF digit: {digit}")
+                    try:
+                        return InputDTMFFrame(KeypadEntry(digit))
+                    except ValueError:
+                        logger.warning(f"Invalid DTMF digit received: {digit}")
+                        return None
+                else:
+                    logger.debug(f"Vonage event: {event}")
+                    return None
+
+            except json.JSONDecodeError:
+                logger.warning(f"Failed to parse JSON message from Vonage: {data}")
+                return None

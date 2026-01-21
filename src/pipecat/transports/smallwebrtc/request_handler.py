@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2024–2025, Daily
+# Copyright (c) 2024-2026, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from aiortc.sdp import candidate_from_sdp
 from fastapi import HTTPException
 from loguru import logger
 
@@ -37,6 +38,41 @@ class SmallWebRTCRequest:
     pc_id: Optional[str] = None
     restart_pc: Optional[bool] = None
     request_data: Optional[Any] = None
+
+    @classmethod
+    def from_dict(cls, data: dict):
+        """Accept both snake_case and camelCase for the request_data field."""
+        if "requestData" in data and "request_data" not in data:
+            data["request_data"] = data.pop("requestData")
+        return cls(**data)
+
+
+@dataclass
+class IceCandidate:
+    """The remote ice candidate object received from the peer connection.
+
+    Parameters:
+        candidate: The ice candidate patch SDP string (Session Description Protocol).
+        sdp_mid: The SDP mid for the candidate patch.
+        sdp_mline_index: The SDP mline index for the candidate patch.
+    """
+
+    candidate: str
+    sdp_mid: str
+    sdp_mline_index: int
+
+
+@dataclass
+class SmallWebRTCPatchRequest:
+    """Small WebRTC transport session arguments for the runner.
+
+    Parameters:
+        pc_id: Identifier for the peer connection.
+        candidates: A list of ICE candidate patches.
+    """
+
+    pc_id: str
+    candidates: List[IceCandidate]
 
 
 class ConnectionMode(Enum):
@@ -124,7 +160,7 @@ class SmallWebRTCRequestHandler:
         self,
         request: SmallWebRTCRequest,
         webrtc_connection_callback: Callable[[Any], Awaitable[None]],
-    ) -> None:
+    ) -> Optional[Dict[str, str]]:
         """Handle a SmallWebRTC request and resolve the pending answer.
 
         This method will:
@@ -139,6 +175,10 @@ class SmallWebRTCRequestHandler:
                 SDP, type, and optionally a `pc_id`.
             webrtc_connection_callback (Callable[[Any], Awaitable[None]]): An
                 asynchronous callback function that is invoked with the WebRTC connection.
+
+        Returns:
+            Dictionary containing SDP answer, type, and peer connection ID,
+            or None if no answer is available.
 
         Raises:
             HTTPException: If connection mode constraints are violated
@@ -196,6 +236,19 @@ class SmallWebRTCRequestHandler:
             logger.error(f"Error processing SmallWebRTC request: {e}")
             logger.debug(f"SmallWebRTC request details: {request}")
             raise
+
+    async def handle_patch_request(self, request: SmallWebRTCPatchRequest):
+        """Handle a SmallWebRTC patch candidate request."""
+        peer_connection = self._pcs_map.get(request.pc_id)
+
+        if not peer_connection:
+            raise HTTPException(status_code=404, detail="Peer connection not found")
+
+        for c in request.candidates:
+            candidate = candidate_from_sdp(c.candidate)
+            candidate.sdpMid = c.sdp_mid
+            candidate.sdpMLineIndex = c.sdp_mline_index
+            await peer_connection.add_ice_candidate(candidate)
 
     async def close(self):
         """Clear the connection map."""

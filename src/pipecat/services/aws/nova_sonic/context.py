@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2025, Daily
+# Copyright (c) 2024-2026, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
@@ -8,7 +8,74 @@
 
 This module provides specialized context aggregators and message handling for AWS Nova Sonic,
 including conversation history management and role-specific message processing.
+
+.. deprecated:: 0.0.91
+    AWS Nova Sonic no longer uses types from this module under the hood.
+    It now uses ``LLMContext`` and ``LLMContextAggregatorPair``.
+    Using the new patterns should allow you to not need types from this module.
+
+    BEFORE::
+
+        # Setup
+        context = OpenAILLMContext(messages, tools)
+        context_aggregator = llm.create_context_aggregator(context)
+
+        # Context frame type
+        frame: OpenAILLMContextFrame
+
+        # Context type
+        context: AWSNovaSonicLLMContext
+        # or
+        context: OpenAILLMContext
+
+    AFTER::
+
+        # Setup
+        context = LLMContext(messages, tools)
+        context_aggregator = LLMContextAggregatorPair(context)
+
+        # Context frame type
+        frame: LLMContextFrame
+
+        # Context type
+        context: LLMContext
 """
+
+import warnings
+
+with warnings.catch_warnings():
+    warnings.simplefilter("always")
+    warnings.warn(
+        "Types in pipecat.services.aws.nova_sonic.context (or "
+        "pipecat.services.aws_nova_sonic.context) are deprecated. \n"
+        "AWS Nova Sonic no longer uses types from this module under the hood. \n"
+        "It now uses `LLMContext` and `LLMContextAggregatorPair`. \n"
+        "Using the new patterns should allow you to not need types from this module.\n\n"
+        "BEFORE:\n"
+        "```\n"
+        "# Setup\n"
+        "context = OpenAILLMContext(messages, tools)\n"
+        "context_aggregator = llm.create_context_aggregator(context)\n\n"
+        "# Context frame type\n"
+        "frame: OpenAILLMContextFrame\n\n"
+        "# Context type\n"
+        "context: AWSNovaSonicLLMContext\n"
+        "# or\n"
+        "context: OpenAILLMContext\n\n"
+        "```\n\n"
+        "AFTER:\n"
+        "```\n"
+        "# Setup\n"
+        "context = LLMContext(messages, tools)\n"
+        "context_aggregator = LLMContextAggregatorPair(context)\n\n"
+        "# Context frame type\n"
+        "frame: LLMContextFrame\n\n"
+        "# Context type\n"
+        "context: LLMContext\n\n"
+        "```",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
 import copy
 from dataclasses import dataclass, field
@@ -87,6 +154,11 @@ class AWSNovaSonicLLMContext(OpenAILLMContext):
 
     Extends OpenAI context with Nova Sonic-specific message handling,
     conversation history management, and text buffering capabilities.
+
+    .. deprecated:: 0.0.99
+        `AWSNovaSonicLLMContext` is deprecated and will be removed in a future version.
+        Use the universal `LLMContext` and `LLMContextAggregatorPair` instead.
+        See `OpenAILLMContext` docstring for migration guide.
     """
 
     def __init__(self, messages=None, tools=None, **kwargs):
@@ -97,6 +169,7 @@ class AWSNovaSonicLLMContext(OpenAILLMContext):
             tools: Available tools for the context.
             **kwargs: Additional arguments passed to parent class.
         """
+        # Super handles deprecation warning
         super().__init__(messages=messages, tools=tools, **kwargs)
         self.__setup_local()
 
@@ -267,7 +340,14 @@ class AWSNovaSonicUserContextAggregator(OpenAIUserContextAggregator):
 
     Extends the OpenAI user context aggregator to emit Nova Sonic-specific
     context update frames.
+
+    .. deprecated:: 0.0.99
+        `AWSNovaSonicUserContextAggregator` is deprecated and will be removed in a future version.
+        Use the universal `LLMContext` and `LLMContextAggregatorPair` instead.
+        See `OpenAILLMContext` docstring for migration guide.
     """
+
+    # Super handles deprecation warning
 
     async def process_frame(
         self, frame: Frame, direction: FrameDirection = FrameDirection.DOWNSTREAM
@@ -290,7 +370,14 @@ class AWSNovaSonicAssistantContextAggregator(OpenAIAssistantContextAggregator):
 
     Provides specialized handling for assistant responses and function calls
     in AWS Nova Sonic context, with custom frame processing logic.
+
+    .. deprecated:: 0.0.99
+        `AWSNovaSonicAssistantContextAggregator` is deprecated and will be removed in a future version.
+        Use the universal `LLMContext` and `LLMContextAggregatorPair` instead.
+        See `OpenAILLMContext` docstring for migration guide.
     """
+
+    # Super handles deprecation warning
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         """Process frames with Nova Sonic-specific logic.
@@ -342,11 +429,17 @@ class AWSNovaSonicAssistantContextAggregator(OpenAIAssistantContextAggregator):
 class AWSNovaSonicContextAggregatorPair:
     """Pair of user and assistant context aggregators for AWS Nova Sonic.
 
+    .. deprecated:: 0.0.99
+        `AWSNovaSonicContextAggregatorPair` is deprecated and will be removed in a future version.
+        Use the universal `LLMContext` and `LLMContextAggregatorPair` instead.
+        See `OpenAILLMContext` docstring for migration guide.
+
     Parameters:
         _user: The user context aggregator.
         _assistant: The assistant context aggregator.
     """
 
+    # Aggregators handle deprecation warnings
     _user: AWSNovaSonicUserContextAggregator
     _assistant: AWSNovaSonicAssistantContextAggregator
 
