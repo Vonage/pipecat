@@ -2209,45 +2209,75 @@ class TestVonageVideoConnectorTransport:
             mock_call_event_handler.assert_called_with("on_joined", {"sessionId": "session-123"})
 
             await transport._on_disconnected(mock_session)
-            mock_call_event_handler.assert_called_with("on_left")
+            mock_call_event_handler.assert_called_with("on_left", {"sessionId": "session-123"})
 
             await transport._on_error(mock_session, "test error", 500)
             mock_call_event_handler.assert_called_with("on_error", "test error")
 
             # Test stream events
+            mock_connection = Mock()
+            mock_connection.data = "connection-data-123"
             mock_stream = Mock()
             mock_stream.id = "stream-456"
+            mock_stream.connection = mock_connection
 
             await transport._on_stream_received(mock_session, mock_stream)
             # Should call both first participant and participant joined events
             expected_calls = [
                 call(
                     "on_first_participant_joined",
-                    {"sessionId": "session-123", "streamId": "stream-456"},
+                    {
+                        "sessionId": "session-123",
+                        "streamId": "stream-456",
+                        "connectionData": "connection-data-123",
+                    },
                 ),
                 call(
-                    "on_participant_joined", {"sessionId": "session-123", "streamId": "stream-456"}
+                    "on_participant_joined",
+                    {
+                        "sessionId": "session-123",
+                        "streamId": "stream-456",
+                        "connectionData": "connection-data-123",
+                    },
                 ),
             ]
             mock_call_event_handler.assert_has_calls(expected_calls)
 
             await transport._on_stream_dropped(mock_session, mock_stream)
             mock_call_event_handler.assert_called_with(
-                "on_participant_left", {"sessionId": "session-123", "streamId": "stream-456"}
+                "on_participant_left",
+                {
+                    "sessionId": "session-123",
+                    "streamId": "stream-456",
+                    "connectionData": "connection-data-123",
+                },
             )
 
             # Test subscriber events
             mock_subscriber = Mock()
+            mock_subscriber.stream = Mock()
             mock_subscriber.stream.id = "subscriber-789"
+            mock_subscriber.stream.connection = Mock()
+            mock_subscriber.stream.connection.data = "subscriber-conn-data"
 
             await transport._on_subscriber_connected(mock_subscriber)
             mock_call_event_handler.assert_called_with(
-                "on_client_connected", {"subscriberId": "subscriber-789"}
+                "on_client_connected",
+                {
+                    "subscriberId": "subscriber-789",
+                    "streamId": "subscriber-789",
+                    "connectionData": "subscriber-conn-data",
+                },
             )
 
             await transport._on_subscriber_disconnected(mock_subscriber)
             mock_call_event_handler.assert_called_with(
-                "on_client_disconnected", {"subscriberId": "subscriber-789"}
+                "on_client_disconnected",
+                {
+                    "subscriberId": "subscriber-789",
+                    "streamId": "subscriber-789",
+                    "connectionData": "subscriber-conn-data",
+                },
             )
 
     @pytest.mark.asyncio
@@ -2261,10 +2291,18 @@ class TestVonageVideoConnectorTransport:
         ) as mock_call_event_handler:
             mock_session = Mock()
             mock_session.id = "session-123"
+
+            mock_connection1 = Mock()
+            mock_connection1.data = "conn-data-1"
             mock_stream1 = Mock()
             mock_stream1.id = "stream-456"
+            mock_stream1.connection = mock_connection1
+
+            mock_connection2 = Mock()
+            mock_connection2.data = "conn-data-2"
             mock_stream2 = Mock()
             mock_stream2.id = "stream-789"
+            mock_stream2.connection = mock_connection2
 
             # First stream should trigger first participant event
             await transport._on_stream_received(mock_session, mock_stream1)
@@ -2276,7 +2314,12 @@ class TestVonageVideoConnectorTransport:
             # Second stream should not trigger first participant event
             await transport._on_stream_received(mock_session, mock_stream2)
             mock_call_event_handler.assert_called_once_with(
-                "on_participant_joined", {"sessionId": "session-123", "streamId": "stream-789"}
+                "on_participant_joined",
+                {
+                    "sessionId": "session-123",
+                    "streamId": "stream-789",
+                    "connectionData": "conn-data-2",
+                },
             )
 
 

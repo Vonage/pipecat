@@ -1435,13 +1435,13 @@ class VonageVideoConnectorTransport(BaseTransport):
         """
         await self._call_event_handler("on_joined", {"sessionId": session.id})
 
-    async def _on_disconnected(self, _session_id: Session) -> None:
+    async def _on_disconnected(self, session: Session) -> None:
         """Handle session disconnected event.
 
         Args:
-            _session_id: The disconnected Session object.
+            session: The disconnected Session object.
         """
-        await self._call_event_handler("on_left")
+        await self._call_event_handler("on_left", {"sessionId": session.id})
 
     async def _on_error(self, _session: Session, description: str, _code: int) -> None:
         """Handle session error event.
@@ -1463,11 +1463,21 @@ class VonageVideoConnectorTransport(BaseTransport):
         if not self._one_stream_received:
             self._one_stream_received = True
             await self._call_event_handler(
-                "on_first_participant_joined", {"sessionId": session.id, "streamId": stream.id}
+                "on_first_participant_joined",
+                {
+                    "sessionId": session.id,
+                    "streamId": stream.id,
+                    "connectionData": stream.connection.data,
+                },
             )
 
         await self._call_event_handler(
-            "on_participant_joined", {"sessionId": session.id, "streamId": stream.id}
+            "on_participant_joined",
+            {
+                "sessionId": session.id,
+                "streamId": stream.id,
+                "connectionData": stream.connection.data,
+            },
         )
 
     async def _on_stream_dropped(self, session: Session, stream: Stream) -> None:
@@ -1478,7 +1488,12 @@ class VonageVideoConnectorTransport(BaseTransport):
             stream: The dropped Stream object.
         """
         await self._call_event_handler(
-            "on_participant_left", {"sessionId": session.id, "streamId": stream.id}
+            "on_participant_left",
+            {
+                "sessionId": session.id,
+                "streamId": stream.id,
+                "connectionData": stream.connection.data,
+            },
         )
 
     async def _on_subscriber_connected(self, subscriber: Subscriber) -> None:
@@ -1488,7 +1503,12 @@ class VonageVideoConnectorTransport(BaseTransport):
             subscriber: The connected Subscriber object.
         """
         await self._call_event_handler(
-            "on_client_connected", {"subscriberId": subscriber.stream.id}
+            "on_client_connected",
+            {
+                "subscriberId": subscriber.stream.id,
+                "streamId": subscriber.stream.id,
+                "connectionData": subscriber.stream.connection.data,
+            },
         )
 
     async def _on_subscriber_disconnected(self, subscriber: Subscriber) -> None:
@@ -1498,7 +1518,12 @@ class VonageVideoConnectorTransport(BaseTransport):
             subscriber: The disconnected Subscriber object.
         """
         await self._call_event_handler(
-            "on_client_disconnected", {"subscriberId": subscriber.stream.id}
+            "on_client_disconnected",
+            {
+                "subscriberId": subscriber.stream.id,
+                "streamId": subscriber.stream.id,
+                "connectionData": subscriber.stream.connection.data,
+            },
         )
 
 
