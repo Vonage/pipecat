@@ -281,7 +281,7 @@ class TestVonageVideoConnectorTransport:
     def test_vonage_transport_params_defaults(self) -> None:
         """Test VonageVideoConnectorTransportParams default values."""
         params = self.VonageVideoConnectorTransportParams()
-        assert params.publisher_name == ""
+        assert params.publisher_name == "Bot"
         assert params.publisher_enable_opus_dtx is False
         assert params.session_enable_migration is False
 

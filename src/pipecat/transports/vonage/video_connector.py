@@ -78,7 +78,7 @@ class VonageVideoConnectorTransportParams(TransportParams):
         clear_buffers_on_interruption: Whether to clear media buffers when an interruption frame is received.
     """
 
-    publisher_name: str = ""
+    publisher_name: str = "Bot"
     publisher_enable_opus_dtx: bool = False
     session_enable_migration: bool = False
     audio_in_auto_subscribe: bool = True
