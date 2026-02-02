@@ -2084,6 +2084,66 @@ class TestVonageVideoConnectorTransport:
             clear_buffers_mock.assert_called_once()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("transport_type", ["input", "output"])
+    async def test_vonage_transport_sets_audio_sample_rates_from_start_frame(
+        self, transport_type: str
+    ) -> None:
+        """Test transport sets audio sample rates from StartFrame when params are None."""
+        # Create params with None sample rates
+        params = self.VonageVideoConnectorTransportParams(
+            audio_in_enabled=(transport_type == "input"),
+            audio_out_enabled=(transport_type == "output"),
+            audio_in_sample_rate=None,
+            audio_out_sample_rate=None,
+        )
+        transport: VonageVideoConnectorInputTransport | VonageVideoConnectorOutputTransport
+        if transport_type == "input":
+            transport = await self._create_input_transport(params=params)
+        else:
+            transport = await self._create_output_transport(params=params)
+        client = transport._client
+
+        # Create a StartFrame with specific sample rates
+        start_frame = StartFrame(audio_in_sample_rate=22050, audio_out_sample_rate=44100)
+
+        with patch.object(client, "_sdk_connect", AsyncMock()):
+            await transport.start(start_frame)
+
+            # Verify both sample rates were set from the StartFrame
+            assert client._audio_in_sample_rate == 22050
+            assert client._audio_out_sample_rate == 44100
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("transport_type", ["input", "output"])
+    async def test_vonage_transport_doesnt_override_audio_sample_rates(
+        self, transport_type: str
+    ) -> None:
+        """Test transport doesn't override audio sample rates when already set in params."""
+        # Create params with specific sample rates
+        params = self.VonageVideoConnectorTransportParams(
+            audio_in_enabled=(transport_type == "input"),
+            audio_out_enabled=(transport_type == "output"),
+            audio_in_sample_rate=48000,
+            audio_out_sample_rate=16000,
+        )
+        transport: VonageVideoConnectorInputTransport | VonageVideoConnectorOutputTransport
+        if transport_type == "input":
+            transport = await self._create_input_transport(params=params)
+        else:
+            transport = await self._create_output_transport(params=params)
+        client = transport._client
+
+        # Create a StartFrame with different sample rates
+        start_frame = StartFrame(audio_in_sample_rate=22050, audio_out_sample_rate=44100)
+
+        with patch.object(client, "_sdk_connect", AsyncMock()):
+            await transport.start(start_frame)
+
+            # Verify sample rates remain as originally set in params
+            assert client._audio_in_sample_rate == 48000
+            assert client._audio_out_sample_rate == 16000
+
+    @pytest.mark.asyncio
     async def test_vonage_transport_initialization(self) -> None:
         """Test VonageVideoConnectorTransport initialization."""
         params = self.VonageVideoConnectorTransportParams(
