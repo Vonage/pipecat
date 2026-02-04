@@ -1,4 +1,0 @@
-python-dotenv
-loguru
-pydub>=0.25
-PyJWT>=2.8.0
