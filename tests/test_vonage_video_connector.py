@@ -1,4 +1,8 @@
+#
+# Copyright (c) 2024-2026, Daily
+#
 # SPDX-License-Identifier: BSD 2-Clause License
+#
 
 import asyncio
 import inspect
@@ -171,21 +175,25 @@ sys.modules["vonage_video_connector"] = vonage_video_mock
 sys.modules["vonage_video_connector.models"] = vonage_video_mock.models
 
 # Now we can import the transport classes since the vonage_video module is mocked
-from pipecat.transports.vonage.video_connector import (
-    AudioProps,
-    ImageFormat,
-    SubscribeSettings,
+from pipecat.transports.vonage.client import (
     VonageClient,
     VonageClientListener,
+)
+from pipecat.transports.vonage.utils import (
+    AudioProps,
+    ImageFormat,
+    check_audio_data,
+    image_colorspace_conversion,
+    process_audio,
+    process_audio_channels,
+)
+from pipecat.transports.vonage.video_connector import (
+    SubscribeSettings,
     VonageException,
     VonageVideoConnectorInputTransport,
     VonageVideoConnectorOutputTransport,
     VonageVideoConnectorTransport,
     VonageVideoConnectorTransportParams,
-    check_audio_data,
-    image_colorspace_conversion,
-    process_audio,
-    process_audio_channels,
 )
 
 
@@ -753,7 +761,7 @@ class TestVonageVideoConnectorTransport:
         try:
             # Patch the timeout to be very short for fast test execution
             with patch(
-                "pipecat.transports.vonage.video_connector.VIDEO_CONNECTOR_TIMEOUT",
+                "pipecat.transports.vonage.client.VIDEO_CONNECTOR_TIMEOUT",
                 timedelta(seconds=0.1),
             ):
                 # Attempt to connect, should timeout
@@ -962,7 +970,7 @@ class TestVonageVideoConnectorTransport:
         try:
             # Patch the timeout to be very short for fast test execution
             with patch(
-                "pipecat.transports.vonage.video_connector.VIDEO_CONNECTOR_TIMEOUT",
+                "pipecat.transports.vonage.client.VIDEO_CONNECTOR_TIMEOUT",
                 timedelta(seconds=0.1),
             ):
                 # Attempt to connect, should timeout
@@ -1019,7 +1027,7 @@ class TestVonageVideoConnectorTransport:
         self.mock_client_instance.clear_media_buffers.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("pipecat.transports.vonage.video_connector.VIDEO_QUEUE_MAXSIZE", 1)
+    @patch("pipecat.transports.vonage.client.VIDEO_QUEUE_MAXSIZE", 1)
     async def test_vonage_client_sdk_cb_to_loop_full_queue(self) -> None:
         """Test VonageClient SDK callback to loop filling up the queue."""
         params = self.VonageVideoConnectorTransportParams()
@@ -1054,7 +1062,7 @@ class TestVonageVideoConnectorTransport:
         client._video_queue.task_done()
 
     @pytest.mark.asyncio
-    @patch("pipecat.transports.vonage.video_connector.create_stream_resampler")
+    @patch("pipecat.transports.vonage.client.create_stream_resampler")
     async def test_vonage_client_get_audio_with_resampling(self, mock_resampler: MagicMock) -> None:
         """Test VonageClient get_audio method."""
         # Return resampled stereo data
@@ -1124,7 +1132,7 @@ class TestVonageVideoConnectorTransport:
         assert call_args.sample_rate == 48000
 
     @pytest.mark.asyncio
-    @patch("pipecat.transports.vonage.video_connector.create_stream_resampler")
+    @patch("pipecat.transports.vonage.client.create_stream_resampler")
     async def test_vonage_client_write_audio_with_resampling(
         self, mock_resampler: MagicMock
     ) -> None:
@@ -1305,7 +1313,7 @@ class TestVonageVideoConnectorTransport:
         # Patch the timeout to be very short for fast test execution
         # the call never gets on_connected_cb or any other callback, it will timeout
         with patch(
-            "pipecat.transports.vonage.video_connector.VIDEO_CONNECTOR_TIMEOUT",
+            "pipecat.transports.vonage.client.VIDEO_CONNECTOR_TIMEOUT",
             timedelta(seconds=0.1),
         ):
             with pytest.raises(asyncio.TimeoutError):
@@ -2448,7 +2456,7 @@ class TestAudioNormalization:
         np.testing.assert_array_equal(result, audio)
 
     @pytest.mark.asyncio
-    @patch("pipecat.transports.vonage.video_connector.create_stream_resampler")
+    @patch("pipecat.transports.vonage.client.create_stream_resampler")
     async def test_process_audio_same_sample_rate(self, mock_resampler: MagicMock) -> None:
         """Test process_audio when sample rates are the same."""
         mock_resampler_instance = Mock()
@@ -2468,7 +2476,7 @@ class TestAudioNormalization:
         mock_resampler_instance.resample.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch("pipecat.transports.vonage.video_connector.create_stream_resampler")
+    @patch("pipecat.transports.vonage.client.create_stream_resampler")
     async def test_process_audio_different_sample_rate_mono(
         self, mock_resampler: MagicMock
     ) -> None:
@@ -2493,7 +2501,7 @@ class TestAudioNormalization:
         mock_resampler_instance.resample.assert_called_once_with(audio.tobytes(), 48000, 16000)
 
     @pytest.mark.asyncio
-    @patch("pipecat.transports.vonage.video_connector.create_stream_resampler")
+    @patch("pipecat.transports.vonage.client.create_stream_resampler")
     async def test_process_audio_different_sample_rate_stereo_to_mono(
         self, mock_resampler: MagicMock
     ) -> None:
@@ -2523,7 +2531,7 @@ class TestAudioNormalization:
         )
 
     @pytest.mark.asyncio
-    @patch("pipecat.transports.vonage.video_connector.create_stream_resampler")
+    @patch("pipecat.transports.vonage.client.create_stream_resampler")
     async def test_process_audio_different_sample_rate_mono_to_stereo(
         self, mock_resampler: MagicMock
     ) -> None:
