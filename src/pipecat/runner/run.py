@@ -87,6 +87,7 @@ from pipecat.runner.types import (
     VonageRunnerArguments,
     WebSocketRunnerArguments,
 )
+from pipecat.runner.vonage import configure as configure_vonage
 
 try:
     import uvicorn
@@ -835,10 +836,9 @@ async def _run_vonage():
     """Run Vonage bot (no FastAPI server)."""
     logger.info("Running Vonage transport...")
 
+    application_id, session_id, token = configure_vonage()
     runner_args = VonageRunnerArguments(
-        application_id=os.getenv("VONAGE_APPLICATION_ID", ""),
-        session_id=os.getenv("VONAGE_SESSION_ID", ""),
-        token=os.getenv("VONAGE_TOKEN", ""),
+        application_id=application_id, session_id=session_id, token=token
     )
     runner_args.handle_sigint = True
 
