@@ -262,7 +262,7 @@ def get_transport_client_id(transport: BaseTransport, client: Any) -> str:
         from pipecat.transports.vonage.video_connector import VonageVideoConnectorTransport
 
         if isinstance(transport, VonageVideoConnectorTransport):
-            return client.get["streamId"]
+            return client["streamId"]
     except ImportError:
         pass
 

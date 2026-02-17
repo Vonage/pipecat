@@ -836,7 +836,7 @@ async def _run_vonage():
     """Run Vonage bot (no FastAPI server)."""
     logger.info("Running Vonage transport...")
 
-    application_id, session_id, token = configure_vonage()
+    application_id, session_id, token = await configure_vonage()
     runner_args = VonageRunnerArguments(
         application_id=application_id, session_id=session_id, token=token
     )
