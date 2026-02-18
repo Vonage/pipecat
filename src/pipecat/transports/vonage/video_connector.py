@@ -342,10 +342,10 @@ class VonageVideoConnectorTransport(BaseTransport):
         self._register_event_handler("on_joined")
         self._register_event_handler("on_left")
         self._register_event_handler("on_error")
-        self._register_event_handler("on_client_connected")
+        self._register_event_handler("on_client_connected", sync=True)
         self._register_event_handler("on_client_disconnected")
-        self._register_event_handler("on_first_participant_joined")
-        self._register_event_handler("on_participant_joined")
+        self._register_event_handler("on_first_participant_joined", sync=True)
+        self._register_event_handler("on_participant_joined", sync=True)
         self._register_event_handler("on_participant_left")
 
         self._client.add_listener(
@@ -427,25 +427,16 @@ class VonageVideoConnectorTransport(BaseTransport):
             session: The Session object.
             stream: The received Stream object.
         """
+        client = {
+            "sessionId": session.id,
+            "streamId": stream.id,
+            "connectionData": stream.connection.data,
+        }
         if not self._one_stream_received:
             self._one_stream_received = True
-            await self._call_event_handler(
-                "on_first_participant_joined",
-                {
-                    "sessionId": session.id,
-                    "streamId": stream.id,
-                    "connectionData": stream.connection.data,
-                },
-            )
+            await self._call_event_handler("on_first_participant_joined", client)
 
-        await self._call_event_handler(
-            "on_participant_joined",
-            {
-                "sessionId": session.id,
-                "streamId": stream.id,
-                "connectionData": stream.connection.data,
-            },
-        )
+        await self._call_event_handler("on_participant_joined", client)
 
     async def _on_stream_dropped(self, session: Session, stream: Stream) -> None:
         """Handle stream dropped event.
@@ -454,14 +445,12 @@ class VonageVideoConnectorTransport(BaseTransport):
             session: The Session object.
             stream: The dropped Stream object.
         """
-        await self._call_event_handler(
-            "on_participant_left",
-            {
-                "sessionId": session.id,
-                "streamId": stream.id,
-                "connectionData": stream.connection.data,
-            },
-        )
+        client = {
+            "sessionId": session.id,
+            "streamId": stream.id,
+            "connectionData": stream.connection.data,
+        }
+        await self._call_event_handler("on_participant_left", client)
 
     async def _on_subscriber_connected(self, subscriber: Subscriber) -> None:
         """Handle subscriber connected event.

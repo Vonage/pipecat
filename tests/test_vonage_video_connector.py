@@ -1296,6 +1296,104 @@ class TestVonageVideoConnectorTransport:
         on_subscriber_disconnected_mock.assert_called_once_with(subscriber)
 
     @pytest.mark.asyncio
+    async def test_vonage_client_subscribe_to_stream_same_and_different_params(self) -> None:
+        """Test VonageClient subscribe_to_stream when subscribing multiple times with same and different parameters."""
+        params = self.VonageVideoConnectorTransportParams(audio_in_enabled=True)
+        client = await self._create_client(params)
+
+        listener = self.VonageClientListener()
+        client.add_listener(listener)
+        on_subscriber_connected_mock = AsyncMock()
+        listener.on_subscriber_connected = on_subscriber_connected_mock
+
+        await client.connect()
+
+        # Add a stream to the session
+        stream = vonage_video_mock.models.Stream(id="test_stream", connection=DUMMY_CONNECTION)
+        client._session_streams["test_stream"] = stream
+
+        # Setup subscriber callbacks
+        self._setup_subscriber_callbacks(client)
+
+        # First subscription with specific parameters
+        subscribe_params_1 = SubscribeSettings(
+            subscribe_to_audio=True,
+            subscribe_to_video=True,
+            preferred_resolution=(640, 480),
+            preferred_framerate=30,
+        )
+
+        subscriber = vonage_video_mock.models.Subscriber(stream=stream)
+        await self._subscribe_n_handle_callbacks(
+            client,
+            "test_stream",
+            subscribe_params_1,
+            lambda callbacks: callbacks.on_connected_cb(subscriber),
+        )
+        on_subscriber_connected_mock.assert_called_once_with(subscriber)
+
+        # Verify subscribe was called once
+        assert self.mock_client_instance.subscribe.call_count == 1
+        assert "test_stream" in client._session_subscriptions
+        assert client._session_subscriptions["test_stream"] == subscribe_params_1
+
+        # Subscribe again with SAME parameters - should do nothing
+        await client.subscribe_to_stream("test_stream", subscribe_params_1)
+
+        # Verify subscribe was still only called once (no new subscription)
+        assert self.mock_client_instance.subscribe.call_count == 1
+        # Verify unsubscribe was NOT called
+        self.mock_client_instance.unsubscribe.assert_not_called()
+        # Subscription should remain unchanged
+        assert client._session_subscriptions["test_stream"] == subscribe_params_1
+
+        # Subscribe again with DIFFERENT parameters - should unsubscribe and resubscribe
+        subscribe_params_2 = SubscribeSettings(
+            subscribe_to_audio=False,
+            subscribe_to_video=True,
+            preferred_resolution=(1280, 720),
+            preferred_framerate=60,
+        )
+
+        # Track the current subscribe call count before resubscribing
+        initial_subscribe_count = self.mock_client_instance.subscribe.call_count
+
+        # Start the resubscription
+        resubscribe_task = asyncio.create_task(
+            client.subscribe_to_stream("test_stream", subscribe_params_2)
+        )
+
+        # Wait for the new subscribe call to be made
+        await self._wait_for_condition(
+            lambda: self.mock_client_instance.subscribe.call_count > initial_subscribe_count,
+            timeout=timedelta(seconds=2),
+        )
+
+        # Now trigger the connected callback with the new subscription callbacks
+        self._subscriber_callbacks["test_stream"].on_connected_cb(subscriber)
+        await resubscribe_task
+
+        # Verify unsubscribe was called once (to remove old subscription)
+        self.mock_client_instance.unsubscribe.assert_called_once_with(stream)
+        # Verify subscribe was called a second time (for new subscription)
+        assert self.mock_client_instance.subscribe.call_count == 2
+        # Verify new subscription parameters are stored
+        assert client._session_subscriptions["test_stream"] == subscribe_params_2
+
+        # Verify the second subscribe call had the new parameters
+        second_call_args = self.mock_client_instance.subscribe.call_args
+        expected_settings = MockSubscriberSettings(
+            subscribe_to_audio=False,
+            subscribe_to_video=True,
+            video_settings=MockSubscriberVideoSettings(
+                preferred_resolution=MockVideoResolution(width=1280, height=720),
+                preferred_framerate=60,
+            ),
+        )
+        assert second_call_args[0][0] == stream
+        assert second_call_args[1]["settings"] == expected_settings
+
+    @pytest.mark.asyncio
     async def test_vonage_client_subscribe_to_stream_timeout(self) -> None:
         """Test VonageClient subscribe_to_stream when SDK subscribe times out."""
         params = self.VonageVideoConnectorTransportParams(audio_in_enabled=True)
