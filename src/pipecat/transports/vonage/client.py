@@ -510,9 +510,22 @@ class VonageClient:
             stream_id: The ID of the participant to subscribe to.
             params: Subscription parameters for the subscription.
         """
+        previous_subscription: None | SubscribeSettings = self._session_subscriptions.get(stream_id)
+        if previous_subscription and previous_subscription == params:
+            logger.info(f"Already subscribed to stream {stream_id} with the same parameters")
+            return
+
         stream = self._session_streams.get(stream_id, None) or Stream(
             id=stream_id, connection=DUMMY_CONNECTION
         )
+        if previous_subscription and previous_subscription != params:
+            logger.warning(
+                f"Already subscribed to stream {stream_id} with different parameters, "
+                f"re-subscribing with new parameters {params} "
+                f"(previous parameters were {previous_subscription})"
+            )
+            self._client.unsubscribe(stream)
+            self._session_subscriptions.pop(stream_id, None)
 
         await self._sdk_subscribe(stream, params)
 
@@ -709,6 +722,8 @@ class VonageClient:
     async def _sdk_subscribe(self, stream: Stream, params: SubscribeSettings) -> None:
         subscribed_future = self._get_event_loop().create_future()
         self._session_subscriptions[stream.id] = params
+
+        logger.info(f"Subscribing to stream {stream.id} with params {params}")
 
         def on_error_cb(subscriber: Subscriber, error: str, code: int) -> None:
             async def async_cb() -> None:
