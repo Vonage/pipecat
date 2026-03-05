@@ -8,6 +8,9 @@ on:
         description: 'Branch, tag, or commit to build (e.g., main, feature/xyz)'
         required: true
         default: 'main'
+  push:
+    branches:
+      - main
 
 jobs:
   build-and-publish:
