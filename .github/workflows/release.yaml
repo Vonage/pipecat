@@ -1,20 +1,23 @@
-name: Publish to GitHub Packages
+name: release
 
 on:
   workflow_dispatch:
     inputs:
       gitref:
         type: string
-        description: 'Branch, tag, or commit to build (e.g., main, feature/xyz)'
+        description: 'Branch, tag, or commit to build'
         required: true
         default: 'main'
   push:
     branches:
       - main
 
+env:
+  PIPECAT_VERSION: "0.0.85"
+
 jobs:
-  build-and-publish:
-    name: 'Build and publish to GitHub Packages'
+  release:
+    name: 'Build and release wheel'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -40,38 +43,32 @@ jobs:
       
       - name: Build project
         run: uv build --wheel
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ env.PIPECAT_VERSION }}
       
-      - name: Get version
-        id: get_version
-        run: |
-          # Extract version from built wheel filename
-          WHEEL_FILE=$(ls dist/*.whl | head -n 1)
-          VERSION=$(basename $WHEEL_FILE | sed -E 's/pipecat_ai-([^-]+)-.*/\1/')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Building version: $VERSION"
-      
-      - name: Upload wheels as artifacts
+      - name: Upload wheel as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pipecat-wheels-${{ steps.get_version.outputs.version }}-${{ github.sha }}
+          name: pipecat-wheel-${{ github.run_number }}-${{ github.sha }}
           path: ./dist
           retention-days: 90
       
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: build-${{ steps.get_version.outputs.version }}-${{ github.run_number }}
-          name: Pipecat Build ${{ steps.get_version.outputs.version }}
+          tag_name: latest-build
+          name: Vonage/pipecat Latest Build
           body: |
-            Automated build of pipecat-ai version ${{ steps.get_version.outputs.version }}
+            Latest automated build of Vonage/pipecat
             
             **Branch:** ${{ github.ref_name }}
             **Commit:** ${{ github.sha }}
+            **Run:** #${{ github.run_number }}
             
             ## Installation
             
             ```bash
-            pip install https://github.com/${{ github.repository }}/releases/download/build-${{ steps.get_version.outputs.version }}-${{ github.run_number }}/pipecat_ai-${{ steps.get_version.outputs.version }}-py3-none-any.whl
+            pip install https://github.com/${{ github.repository }}/releases/download/latest-build/pipecat_ai-${{ env.PIPECAT_VERSION }}-py3-none-any.whl
             ```
           files: dist/*.whl
           draft: false
