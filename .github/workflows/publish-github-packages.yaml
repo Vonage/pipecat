@@ -17,7 +17,7 @@ jobs:
     name: 'Build and publish to GitHub Packages'
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
       id-token: write
     
@@ -57,8 +57,24 @@ jobs:
           path: ./dist
           retention-days: 90
       
-      - name: Publish to GitHub Packages
-        run: uvx twine upload --repository-url https://pypi.pkg.github.com/${{ github.repository_owner }}/ dist/*.whl
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: build-${{ steps.get_version.outputs.version }}-${{ github.run_number }}
+          name: Pipecat Build ${{ steps.get_version.outputs.version }}
+          body: |
+            Automated build of pipecat-ai version ${{ steps.get_version.outputs.version }}
+            
+            **Branch:** ${{ github.ref_name }}
+            **Commit:** ${{ github.sha }}
+            
+            ## Installation
+            
+            ```bash
+            pip install https://github.com/${{ github.repository }}/releases/download/build-${{ steps.get_version.outputs.version }}-${{ github.run_number }}/pipecat_ai-${{ steps.get_version.outputs.version }}-py3-none-any.whl
+            ```
+          files: dist/*.whl
+          draft: false
+          prerelease: true
         env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
