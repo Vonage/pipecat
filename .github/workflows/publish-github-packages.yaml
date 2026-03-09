@@ -57,30 +57,8 @@ jobs:
           path: ./dist
           retention-days: 90
       
-      - name: Create or Update Release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: build-${{ steps.get_version.outputs.version }}-${{ github.run_number }}
-          name: Pipecat Build ${{ steps.get_version.outputs.version }}
-          body: |
-            Automated build of pipecat-ai version ${{ steps.get_version.outputs.version }}
-            
-            **Branch:** ${{ github.ref_name }}
-            **Commit:** ${{ github.sha }}
-            
-            ## Installation
-            
-            To install this version directly:
-            ```bash
-            pip install https://github.com/Vonage/pipecat/releases/download/build-${{ steps.get_version.outputs.version }}-${{ github.run_number }}/pipecat_ai-${{ steps.get_version.outputs.version }}-py3-none-any.whl
-            ```
-            
-            Or add to requirements.txt:
-            ```
-            pipecat-ai @ https://github.com/Vonage/pipecat/releases/download/build-${{ steps.get_version.outputs.version }}-${{ github.run_number }}/pipecat_ai-${{ steps.get_version.outputs.version }}-py3-none-any.whl
-            ```
-          files: dist/*
-          draft: false
-          prerelease: true
+      - name: Publish to GitHub Packages
+        run: uv publish --publish-url https://pypi.pkg.github.com/${{ github.repository_owner }}/
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UV_PUBLISH_USERNAME: __token__
+          UV_PUBLISH_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
