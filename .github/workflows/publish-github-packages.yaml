@@ -39,7 +39,7 @@ jobs:
         run: uv sync --group dev
       
       - name: Build project
-        run: uv build
+        run: uv build --wheel
       
       - name: Get version
         id: get_version
