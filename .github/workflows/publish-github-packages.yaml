@@ -58,7 +58,9 @@ jobs:
           retention-days: 90
       
       - name: Publish to GitHub Packages
-        run: uv publish --publish-url https://pypi.pkg.github.com/${{ github.repository_owner }}/
+        run: |
+          uv pip install twine
+          twine upload --repository-url https://pypi.pkg.github.com/${{ github.repository_owner }}/ dist/*.whl
         env:
-          UV_PUBLISH_USERNAME: __token__
-          UV_PUBLISH_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
