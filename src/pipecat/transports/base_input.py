@@ -32,13 +32,11 @@ from pipecat.frames.frames import (
     Frame,
     InputAudioRawFrame,
     InputImageRawFrame,
-    InterimTranscriptionFrame,
     MetricsFrame,
     SpeechControlParamsFrame,
     StartFrame,
     StopFrame,
     SystemFrame,
-    TranscriptionFrame,
     UserSpeakingFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
@@ -296,15 +294,6 @@ class BaseInputTransport(FrameProcessor):
         """
         if self._params.audio_in_enabled and not self._paused:
             await self._audio_in_queue.put(frame)
-
-    async def push_caption_frame(self, frame: TranscriptionFrame | InterimTranscriptionFrame):
-        """Push a transcription frame downstream if captions input is enabled.
-
-        Args:
-            frame: The input transcription frame to process.
-        """
-        if self._params.captions_in_enabled and not self._paused:
-            await self.push_frame(frame)
 
     #
     # Frame processor
