@@ -14,10 +14,12 @@ from pipecat.frames.frames import (
     EndFrame,
     Frame,
     InputAudioRawFrame,
+    InterimTranscriptionFrame,
     InterruptionFrame,
     OutputAudioRawFrame,
     OutputImageRawFrame,
     StartFrame,
+    TranscriptionFrame,
     UserImageRawFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor, FrameProcessorSetup
@@ -79,11 +81,16 @@ class VonageVideoConnectorInputTransport(BaseInputTransport):
 
         self._initialized = True
 
-        if self._params.audio_in_enabled or self._params.video_in_enabled:
+        if (
+            self._params.audio_in_enabled
+            or self._params.video_in_enabled
+            or self._params.captions_in_enabled
+        ):
             self._listener_id = self._client.add_listener(
                 VonageClientListener(
                     on_audio_in=self._audio_in_cb,
                     on_video_in=self._video_in_cb,
+                    on_caption_text_in=self._caption_in_cb,
                     on_error=self._on_error_cb,
                 )
             )
@@ -111,6 +118,17 @@ class VonageVideoConnectorInputTransport(BaseInputTransport):
         await super().cleanup()  # type: ignore
         await self._client.cleanup()
 
+    async def push_caption_frame(
+        self, frame: TranscriptionFrame | InterimTranscriptionFrame
+    ) -> None:
+        """Push a transcription frame downstream if captions input is enabled.
+
+        Args:
+            frame: The input transcription frame to process.
+        """
+        if self._params.captions_in_enabled and not self._paused:
+            await self.push_frame(frame)
+
     async def _audio_in_cb(self, _session: Session, audio: InputAudioRawFrame) -> None:
         if self._connected and self._params.audio_in_enabled:
             await self.push_audio_frame(audio)
@@ -118,6 +136,12 @@ class VonageVideoConnectorInputTransport(BaseInputTransport):
     async def _video_in_cb(self, _subscriber: Subscriber, video: UserImageRawFrame) -> None:
         if self._connected and self._params.video_in_enabled:
             await self.push_video_frame(video)
+
+    async def _caption_in_cb(
+        self, _subscriber: Subscriber, caption: TranscriptionFrame | InterimTranscriptionFrame
+    ) -> None:
+        if self._connected and self._params.captions_in_enabled:
+            await self.push_caption_frame(caption)
 
     async def _on_error_cb(self, session: Session, description: str, code: int) -> None:
         logger.error(
