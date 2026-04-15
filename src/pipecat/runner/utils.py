@@ -652,5 +652,32 @@ async def create_transport(
             params=params,
         )
 
+    elif isinstance(runner_args, VonageRunnerArguments):
+        from pipecat.transports.vonage.video_connector import (
+            VonageVideoConnectorTransport,
+            VonageVideoConnectorTransportParams,
+        )
+
+        try:
+            params = cast(
+                VonageVideoConnectorTransportParams,
+                _get_transport_params("vonage", transport_params),
+            )
+        except ValueError:
+            webrtc_params: TransportParams = cast(
+                TransportParams, _get_transport_params("webrtc", transport_params)
+            )
+            params = VonageVideoConnectorTransportParams(
+                **webrtc_params.model_dump(),
+                video_in_auto_subscribe=True,
+            )
+
+        return VonageVideoConnectorTransport(
+            runner_args.application_id,
+            runner_args.session_id,
+            runner_args.token,
+            params=params,
+        )
+
     else:
         raise ValueError(f"Unsupported runner arguments type: {type(runner_args)}")
