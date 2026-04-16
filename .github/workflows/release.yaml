@@ -28,21 +28,29 @@ jobs:
           ref: ${{ github.event.inputs.gitref || github.ref }}
           fetch-depth: 0
 
-      - name: Get latest tag
+      - name: Resolve version
         id: get_version
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          BASE_TAG=$(git describe --tags --abbrev=0)
-          BASE_VERSION="${BASE_TAG#v}"
-          TAG="$BASE_TAG"
-          VERSION="$BASE_VERSION"
+          # Get latest release tag, fall back to git describe on first run
+          LATEST_TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null)
+          if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
+            LATEST_TAG=$(git describe --tags --abbrev=0)
+          fi
+
+          # Extract base version (strip leading v and any .postN suffix)
+          BASE_VERSION=$(echo "${LATEST_TAG#v}" | sed -E 's/\.post[0-9]+$//')
+          BASE_TAG="v${BASE_VERSION}"
+
+          # Find the next available .postN suffix
           SUFFIX=1
-          while gh release view "$TAG" &>/dev/null; do
-            TAG="${BASE_TAG}${SUFFIX}"
-            VERSION="${BASE_VERSION}${SUFFIX}"
+          while gh release view "${BASE_TAG}.post${SUFFIX}" &>/dev/null; do
             SUFFIX=$((SUFFIX + 1))
           done
+
+          TAG="${BASE_TAG}.post${SUFFIX}"
+          VERSION="${BASE_VERSION}.post${SUFFIX}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Resolved version: $VERSION (tag: $TAG)"
