@@ -1,0 +1,9 @@
+src/pipecat/transports/vonage/client.py
+  7fa0c0b510b583bb 867
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "0c9bb9652f97bb3294359290cb2b70114d02d406",
+  "prompts": {}
+}
