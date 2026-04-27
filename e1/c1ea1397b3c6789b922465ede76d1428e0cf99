@@ -1,0 +1,24 @@
+pyproject.toml
+  36318beaee571c28 162-173,175-177
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "e1c1ea1397b3c6789b922465ede76d1428e0cf99",
+  "prompts": {
+    "36318beaee571c28": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_2317e6422ffelwdh46LGeeO7DF",
+        "model": "github-copilot/claude-sonnet-4.6"
+      },
+      "human_author": "adidomenico",
+      "messages": [],
+      "total_additions": 15,
+      "total_deletions": 14,
+      "accepted_lines": 15,
+      "overriden_lines": 0,
+      "messages_url": "https://usegitai.com/cas/45bc38bcde8f5e34bbe7f71993a570f5ef144c10dc5bf8ebc61b21de6780d072"
+    }
+  }
+}
