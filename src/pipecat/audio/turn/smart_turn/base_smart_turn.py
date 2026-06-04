@@ -15,7 +15,7 @@ import asyncio
 import time
 from abc import abstractmethod
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 from loguru import logger
@@ -57,7 +57,9 @@ class BaseSmartTurn(BaseTurnAnalyzer):
     implement the specific model prediction logic.
     """
 
-    def __init__(self, *, sample_rate: int | None = None, params: SmartTurnParams | None = None):
+    def __init__(
+        self, *, sample_rate: Optional[int] = None, params: Optional[SmartTurnParams] = None
+    ):
         """Initialize the smart turn analyzer.
 
         Args:
@@ -106,15 +108,10 @@ class BaseSmartTurn(BaseTurnAnalyzer):
         Returns:
             Current end-of-turn state after processing the audio.
         """
-        # Append the raw int16 PCM view to the buffer. Conversion to float32 is
-        # deferred until _process_speech_segment, where it runs once per turn
-        # on the concatenated segment instead of once per ~20 ms audio frame.
-        # Safe because InputAudioRawFrame.audio is typed `bytes` (immutable in
-        # Python); audio filters and mixers that "modify" a frame's audio do
-        # so by reassigning frame.audio to a new bytes object, never by
-        # mutating the buffer this view points at.
+        # Convert raw audio to float32 format and append to the buffer
         audio_int16 = np.frombuffer(buffer, dtype=np.int16)
-        self._audio_buffer.append((time.monotonic(), audio_int16))
+        audio_float32 = np.frombuffer(audio_int16, dtype=np.int16).astype(np.float32) / 32768.0
+        self._audio_buffer.append((time.time(), audio_float32))
 
         state = EndOfTurnState.INCOMPLETE
 
@@ -123,7 +120,7 @@ class BaseSmartTurn(BaseTurnAnalyzer):
             self._silence_ms = 0
             self._speech_triggered = True
             if self._speech_start_time == 0:
-                self._speech_start_time = time.monotonic()
+                self._speech_start_time = time.time()
         else:
             if self._speech_triggered:
                 chunk_duration_ms = len(audio_int16) / (self._sample_rate / 1000)
@@ -143,14 +140,13 @@ class BaseSmartTurn(BaseTurnAnalyzer):
                     + self._params.max_duration_secs
                 )
                 while (
-                    self._audio_buffer
-                    and self._audio_buffer[0][0] < time.monotonic() - max_buffer_time
+                    self._audio_buffer and self._audio_buffer[0][0] < time.time() - max_buffer_time
                 ):
                     self._audio_buffer.pop(0)
 
         return state
 
-    async def analyze_end_of_turn(self) -> tuple[EndOfTurnState, MetricsData | None]:
+    async def analyze_end_of_turn(self) -> Tuple[EndOfTurnState, Optional[MetricsData]]:
         """Analyze the current audio state to determine if turn has ended.
 
         Returns:
@@ -182,7 +178,7 @@ class BaseSmartTurn(BaseTurnAnalyzer):
         self._speech_start_time = 0
         self._silence_ms = 0
 
-    def _process_speech_segment(self, audio_buffer) -> tuple[EndOfTurnState, MetricsData | None]:
+    def _process_speech_segment(self, audio_buffer) -> Tuple[EndOfTurnState, Optional[MetricsData]]:
         """Process accumulated audio segment using ML model."""
         state = EndOfTurnState.INCOMPLETE
 
@@ -200,12 +196,9 @@ class BaseSmartTurn(BaseTurnAnalyzer):
 
         end_index = len(audio_buffer) - 1
 
-        # Extract the audio segment. The buffer holds int16 PCM views; defer
-        # the float32 conversion until after concatenation so it runs once
-        # per turn instead of once per appended frame.
-        segment_chunks_int16 = [chunk for _, chunk in audio_buffer[start_index : end_index + 1]]
-        segment_audio_int16 = np.concatenate(segment_chunks_int16)
-        segment_audio = segment_audio_int16.astype(np.float32) / 32768.0
+        # Extract the audio segment
+        segment_audio_chunks = [chunk for _, chunk in audio_buffer[start_index : end_index + 1]]
+        segment_audio = np.concatenate(segment_audio_chunks)
 
         # Limit maximum duration
         max_samples = int(self._params.max_duration_secs * self.sample_rate)
@@ -255,6 +248,6 @@ class BaseSmartTurn(BaseTurnAnalyzer):
         return state, result_data
 
     @abstractmethod
-    def _predict_endpoint(self, audio_array: np.ndarray) -> dict[str, Any]:
+    def _predict_endpoint(self, audio_array: np.ndarray) -> Dict[str, Any]:
         """Predict end-of-turn using ML model from audio data."""
         pass

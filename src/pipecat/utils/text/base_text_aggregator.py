@@ -12,12 +12,12 @@ aggregated text should be sent for speech synthesis.
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from enum import StrEnum
+from enum import Enum
+from typing import AsyncIterator, Optional
 
 
-class AggregationType(StrEnum):
+class AggregationType(str, Enum):
     """Built-in aggregation strings."""
 
     SENTENCE = "sentence"
@@ -125,10 +125,10 @@ class BaseTextAggregator(ABC):
         """
         pass
         # Make this a generator to satisfy type checker
-        yield  # pyright: ignore[reportReturnType]  # pragma: no cover
+        yield  # pragma: no cover
 
     @abstractmethod
-    async def flush(self) -> Aggregation | None:
+    async def flush(self) -> Optional[Aggregation]:
         """Flush any pending aggregation.
 
         This method is called at the end of a stream (e.g., when receiving

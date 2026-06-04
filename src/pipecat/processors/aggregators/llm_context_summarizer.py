@@ -9,7 +9,7 @@
 import asyncio
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from loguru import logger
 
@@ -101,7 +101,7 @@ class LLMContextSummarizer(BaseObject):
         self,
         *,
         context: LLMContext,
-        config: LLMAutoContextSummarizationConfig | None = None,
+        config: Optional[LLMAutoContextSummarizationConfig] = None,
         auto_trigger: bool = True,
     ):
         """Initialize the context summarizer.
@@ -122,10 +122,10 @@ class LLMContextSummarizer(BaseObject):
         self._auto_config = config or LLMAutoContextSummarizationConfig()
         self._auto_trigger = auto_trigger
 
-        self._task_manager: BaseTaskManager | None = None
+        self._task_manager: Optional[BaseTaskManager] = None
 
         self._summarization_in_progress = False
-        self._pending_summary_request_id: str | None = None
+        self._pending_summary_request_id: Optional[str] = None
 
         self._register_event_handler("on_request_summarization", sync=True)
         self._register_event_handler("on_summary_applied")
@@ -211,16 +211,14 @@ class LLMContextSummarizer(BaseObject):
 
         Evaluates whether the current context has reached either the token
         threshold or message count threshold that warrants compression.
-        Either threshold can be ``None`` to disable that check; at least one
-        must be set (enforced at config construction time).
 
         Returns:
             True if all conditions are met:
             - ``auto_trigger`` is enabled
             - No summarization currently in progress
             - AND either:
-              - Token count exceeds ``max_context_tokens`` (when set)
-              - OR message count exceeds ``max_unsummarized_messages`` since last summary (when set)
+              - Token count exceeds ``max_context_tokens``
+              - OR message count exceeds ``max_unsummarized_messages`` since last summary
         """
         logger.trace(f"{self}: Checking if context summarization is needed")
 
@@ -237,20 +235,19 @@ class LLMContextSummarizer(BaseObject):
 
         # Check if we've reached the token limit
         token_limit = self._auto_config.max_context_tokens
-        token_limit_exceeded = token_limit is not None and total_tokens >= token_limit
+        token_limit_exceeded = total_tokens >= token_limit
 
         # Check if we've exceeded max unsummarized messages
         messages_since_summary = len(self._context.messages) - 1
-        message_threshold = self._auto_config.max_unsummarized_messages
         message_threshold_exceeded = (
-            message_threshold is not None and messages_since_summary >= message_threshold
+            messages_since_summary >= self._auto_config.max_unsummarized_messages
         )
 
         logger.trace(
             f"{self}: Context has {num_messages} messages, "
-            f"~{total_tokens} tokens (limit: {token_limit if token_limit is not None else 'disabled'}), "
+            f"~{total_tokens} tokens (limit: {token_limit}), "
             f"{messages_since_summary} messages since last summary "
-            f"(message threshold: {message_threshold if message_threshold is not None else 'disabled'})"
+            f"(message threshold: {self._auto_config.max_unsummarized_messages})"
         )
 
         # Trigger if either limit is exceeded
@@ -264,12 +261,16 @@ class LLMContextSummarizer(BaseObject):
         if token_limit_exceeded:
             reason.append(f"~{total_tokens} tokens (>={token_limit} limit)")
         if message_threshold_exceeded:
-            reason.append(f"{messages_since_summary} messages (>={message_threshold} threshold)")
+            reason.append(
+                f"{messages_since_summary} messages (>={self._auto_config.max_unsummarized_messages} threshold)"
+            )
 
         logger.debug(f"{self}: ✓ Summarization needed - {', '.join(reason)}")
         return True
 
-    async def _request_summarization(self, config_override: LLMContextSummaryConfig | None = None):
+    async def _request_summarization(
+        self, config_override: Optional[LLMContextSummaryConfig] = None
+    ):
         """Request context summarization from LLM service.
 
         Creates a summarization request frame and either handles it directly
@@ -336,7 +337,7 @@ class LLMContextSummarizer(BaseObject):
                 summary=summary,
                 last_summarized_index=last_index,
             )
-        except TimeoutError:
+        except asyncio.TimeoutError:
             error = f"Context summarization timed out after {timeout}s"
             logger.error(f"{self}: {error}")
             result_frame = LLMContextSummaryResultFrame(
@@ -427,17 +428,18 @@ class LLMContextSummarizer(BaseObject):
         config = self._auto_config.summary_config
         messages = self._context.messages
 
-        # Preserve the first message if it is a system message (initial system prompt).
-        # Only messages[0] is treated as the system preamble — system messages at
-        # other positions are mid-conversation injections and are not preserved
-        # separately (they will be part of the summary or the recent messages).
-        first_system_msg = None
-        if (
-            messages
-            and not isinstance(messages[0], LLMSpecificMessage)
-            and messages[0].get("role") == "system"
-        ):
-            first_system_msg = messages[0]
+        # Find the first system message to preserve. LLMSpecificMessage instances are excluded
+        # because they are not dict-like and never represent a system message; they hold
+        # service-specific metadata (e.g. thinking blocks) that is always paired with a
+        # standard message.
+        first_system_msg = next(
+            (
+                msg
+                for msg in messages
+                if not isinstance(msg, LLMSpecificMessage) and msg.get("role") == "system"
+            ),
+            None,
+        )
 
         # Get recent messages to keep
         recent_messages = messages[last_summarized_index + 1 :]

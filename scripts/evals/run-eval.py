@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
-from eval import EvalConfig, EvalRunner
+from eval import EvalRunner
 from loguru import logger
 from utils import check_env_variables
 
@@ -33,8 +33,7 @@ async def main(args: argparse.Namespace):
 
     runner = EvalRunner(examples_dir=script_path, record_audio=args.audio, log_level=log_level)
 
-    eval_config = EvalConfig(prompt=args.prompt, eval=args.eval)
-    await runner.run_eval(script_file, eval_config)
+    await runner.run_eval(script_file, args.prompt, args.eval)
 
     runner.print_results()
 

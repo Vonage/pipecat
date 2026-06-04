@@ -22,7 +22,7 @@ import time
 import numpy as np
 import soxr
 
-from pipecat.audio.resamplers.base_audio_resampler import BaseAudioResampler, SoxrQuality
+from pipecat.audio.resamplers.base_audio_resampler import BaseAudioResampler
 
 CLEAR_STREAM_AFTER_SECS = 0.2
 
@@ -31,8 +31,8 @@ class SOXRStreamAudioResampler(BaseAudioResampler):
     """Audio resampler implementation using the SoX ResampleStream library.
 
     This resampler uses the SoX ResampleStream library configured for very high
-    quality (VHQ) resampling by default, providing excellent audio quality at
-    the cost of additional computational overhead.
+    quality (VHQ) resampling, providing excellent audio quality at the cost
+    of additional computational overhead.
     It keeps an internal history which avoids clicks at chunk boundaries.
 
     Notes:
@@ -40,16 +40,12 @@ class SOXRStreamAudioResampler(BaseAudioResampler):
         - Input must be 16-bit signed PCM audio as raw bytes.
     """
 
-    def __init__(self, *, quality: SoxrQuality = "VHQ", **kwargs):
+    def __init__(self, **kwargs):
         """Initialize the resampler.
 
         Args:
-            quality: SOXR quality preset. Higher quality means higher CPU cost.
-                One of "VHQ" (default, very high quality), "HQ", "MQ", "LQ",
-                or "QQ" (quick, lowest latency).
-            **kwargs: Reserved for forward compatibility; currently ignored.
+            **kwargs: Additional keyword arguments (currently unused).
         """
-        self._quality = quality
         self._in_rate: float | None = None
         self._out_rate: float | None = None
         self._last_resample_time: float = 0
@@ -60,7 +56,7 @@ class SOXRStreamAudioResampler(BaseAudioResampler):
         self._out_rate = out_rate
         self._last_resample_time = time.time()
         self._soxr_stream = soxr.ResampleStream(
-            in_rate=in_rate, out_rate=out_rate, num_channels=1, quality=self._quality, dtype="int16"
+            in_rate=in_rate, out_rate=out_rate, num_channels=1, quality="VHQ", dtype="int16"
         )
 
     def _maybe_clear_internal_state(self):
@@ -72,7 +68,7 @@ class SOXRStreamAudioResampler(BaseAudioResampler):
                 self._soxr_stream.clear()
         self._last_resample_time = current_time
 
-    def _maybe_initialize_sox_stream(self, in_rate: int, out_rate: int) -> "soxr.ResampleStream":
+    def _maybe_initialize_sox_stream(self, in_rate: int, out_rate: int):
         if self._soxr_stream is None:
             self._initialize(in_rate, out_rate)
         else:
@@ -83,9 +79,6 @@ class SOXRStreamAudioResampler(BaseAudioResampler):
                 f"SOXRStreamAudioResampler cannot be reused with different sample rates: "
                 f"expected {self._in_rate}->{self._out_rate}, got {in_rate}->{out_rate}"
             )
-
-        assert self._soxr_stream is not None
-        return self._soxr_stream
 
     async def resample(self, audio: bytes, in_rate: int, out_rate: int) -> bytes:
         """Resample audio data using soxr.ResampleStream resampler library.
@@ -101,8 +94,8 @@ class SOXRStreamAudioResampler(BaseAudioResampler):
         if in_rate == out_rate:
             return audio
 
-        stream = self._maybe_initialize_sox_stream(in_rate, out_rate)
+        self._maybe_initialize_sox_stream(in_rate, out_rate)
         audio_data = np.frombuffer(audio, dtype=np.int16)
-        resampled_audio = stream.resample_chunk(audio_data)
+        resampled_audio = self._soxr_stream.resample_chunk(audio_data)
         result = resampled_audio.astype(np.int16).tobytes()
         return result

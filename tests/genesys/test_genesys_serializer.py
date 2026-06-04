@@ -76,7 +76,6 @@ class TestGenesysAudioHookSerializer:
 
         assert msg["type"] == "pong"
         assert msg["id"] == serializer.session_id
-        assert msg["parameters"] == {}
 
     def test_create_closed_response(self):
         """Test creating a closed response message."""
@@ -87,7 +86,7 @@ class TestGenesysAudioHookSerializer:
 
         assert msg["type"] == "closed"
         assert serializer.is_open is False
-        assert msg["parameters"] == {}  # Empty parameters when no output_variables
+        assert "parameters" not in msg  # No parameters when no output_variables
 
     def test_create_closed_response_with_output_variables(self):
         """Test creating a closed response with custom output variables."""

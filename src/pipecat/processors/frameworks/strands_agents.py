@@ -4,6 +4,8 @@ This module provides integration with Strands Agents for handling conversational
 interactions. It supports both single agent and multi-agent graphs.
 """
 
+from typing import Optional
+
 from loguru import logger
 
 from pipecat.frames.frames import (
@@ -14,6 +16,7 @@ from pipecat.frames.frames import (
     LLMTextFrame,
 )
 from pipecat.metrics.metrics import LLMTokenUsage
+from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContextFrame
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 try:
@@ -21,7 +24,7 @@ try:
     from strands.multiagent.graph import Graph
 except ModuleNotFoundError as e:
     logger.error("In order to use Strands Agents, you need to `pip install strands-agents`.")
-    raise ImportError(f"Missing module: {e}") from e
+    raise Exception(f"Missing module: {e}")
 
 
 class StrandsAgentsProcessor(FrameProcessor):
@@ -36,9 +39,9 @@ class StrandsAgentsProcessor(FrameProcessor):
 
     def __init__(
         self,
-        agent: Agent | None = None,
-        graph: Graph | None = None,
-        graph_exit_node: str | None = None,
+        agent: Optional[Agent] = None,
+        graph: Optional[Graph] = None,
+        graph_exit_node: Optional[str] = None,
     ):
         """Initialize the Strands Agents processor.
 
@@ -69,17 +72,11 @@ class StrandsAgentsProcessor(FrameProcessor):
             direction: The direction of frame flow in the pipeline.
         """
         await super().process_frame(frame, direction)
-        if isinstance(frame, LLMContextFrame):
+        if isinstance(frame, (LLMContextFrame, OpenAILLMContextFrame)):
             messages = frame.context.get_messages()
-            # Historically this processor has only handled plain-text user
-            # messages; the guards below make that contract explicit for the
-            # type checker. TODO: handle other message shapes (provider-
-            # specific messages, multi-modal content lists, etc.).
-            last_message = messages[-1] if messages else None
-            if isinstance(last_message, dict):
-                content = last_message.get("content")
-                if isinstance(content, str):
-                    await self._ainvoke(content.strip())
+            if messages:
+                last_message = messages[-1]
+                await self._ainvoke(str(last_message["content"]).strip())
         else:
             await self.push_frame(frame, direction)
 
@@ -97,9 +94,6 @@ class StrandsAgentsProcessor(FrameProcessor):
             await self.start_ttfb_metrics()
 
             if self.graph:
-                # `__init__` asserts `graph_exit_node` is set whenever `graph`
-                # is, so this can't be None here.
-                assert self.graph_exit_node is not None
                 # Graph does not stream; await full result then emit assistant text
                 graph_result = await self.graph.invoke_async(text)
                 if ttfb_tracking:
@@ -124,9 +118,6 @@ class StrandsAgentsProcessor(FrameProcessor):
                 except Exception as parse_err:
                     logger.warning(f"Failed to extract messages from GraphResult: {parse_err}")
             else:
-                # `__init__` asserts at least one of `agent`/`graph` is set,
-                # and we're in the `not self.graph` branch.
-                assert self.agent is not None
                 # Agent supports streaming events via async iterator
                 async for event in self.agent.stream_async(text):
                     # Push to TTS service

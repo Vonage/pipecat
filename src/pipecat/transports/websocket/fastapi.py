@@ -16,7 +16,7 @@ import io
 import time
 import typing
 import wave
-from collections.abc import Awaitable, Callable
+from typing import Awaitable, Callable, Optional
 
 from loguru import logger
 from pydantic import BaseModel
@@ -48,7 +48,7 @@ except ModuleNotFoundError as e:
     logger.error(
         "In order to use FastAPI websockets, you need to `pip install pipecat-ai[websocket]`."
     )
-    raise ImportError(f"Missing module: {e}") from e
+    raise Exception(f"Missing module: {e}")
 
 
 class FastAPIWebsocketParams(TransportParams):
@@ -63,9 +63,9 @@ class FastAPIWebsocketParams(TransportParams):
     """
 
     add_wav_header: bool = False
-    serializer: FrameSerializer | None = None
-    session_timeout: int | None = None
-    fixed_audio_packet_size: int | None = None
+    serializer: Optional[FrameSerializer] = None
+    session_timeout: Optional[int] = None
+    fixed_audio_packet_size: Optional[int] = None
 
 
 class FastAPIWebsocketCallbacks(BaseModel):
@@ -150,9 +150,17 @@ class FastAPIWebsocketClient:
                 else:
                     await self._websocket.send_text(data)
         except Exception as e:
-            logger.warning(
+            logger.error(
                 f"{self} exception sending data: {e.__class__.__name__} ({e}), application_state: {self._websocket.application_state}"
             )
+            # For some reason the websocket is disconnected, and we are not able to send data
+            # So let's properly handle it and disconnect the transport if it is not already disconnecting
+            if (
+                self._websocket.application_state == WebSocketState.DISCONNECTED
+                and not self.is_closing
+            ):
+                logger.warning("Closing already disconnected websocket!")
+                self._closing = True
 
     async def disconnect(self):
         """Disconnect the WebSocket client."""
@@ -181,11 +189,7 @@ class FastAPIWebsocketClient:
 
     def _can_send(self):
         """Check if data can be sent through the WebSocket."""
-        return (
-            self.is_connected
-            and not self.is_closing
-            and self._websocket.application_state != WebSocketState.DISCONNECTED
-        )
+        return self.is_connected and not self.is_closing
 
     @property
     def is_connected(self) -> bool:
@@ -255,9 +259,7 @@ class FastAPIWebsocketInputTransport(BaseInputTransport):
         if self._params.serializer:
             await self._params.serializer.setup(frame)
         if not self._monitor_websocket_task and self._params.session_timeout:
-            self._monitor_websocket_task = self.create_task(
-                self._monitor_websocket(self._params.session_timeout)
-            )
+            self._monitor_websocket_task = self.create_task(self._monitor_websocket())
         await self._client.trigger_client_connected()
         await self.push_frame(ClientConnectedFrame())
         if not self._receive_task:
@@ -324,9 +326,9 @@ class FastAPIWebsocketInputTransport(BaseInputTransport):
         if not self._client.is_closing:
             await self._client.trigger_client_disconnected()
 
-    async def _monitor_websocket(self, timeout: int):
-        """Wait for ``timeout`` seconds, then trigger the client-timeout event if still open."""
-        await asyncio.sleep(timeout)
+    async def _monitor_websocket(self):
+        """Wait for self._params.session_timeout seconds, if the websocket is still open, trigger timeout event."""
+        await asyncio.sleep(self._params.session_timeout)
         await self._client.trigger_client_timeout()
 
 
@@ -552,8 +554,8 @@ class FastAPIWebsocketTransport(BaseTransport):
         self,
         websocket: WebSocket,
         params: FastAPIWebsocketParams,
-        input_name: str | None = None,
-        output_name: str | None = None,
+        input_name: Optional[str] = None,
+        output_name: Optional[str] = None,
     ):
         """Initialize the FastAPI WebSocket transport.
 

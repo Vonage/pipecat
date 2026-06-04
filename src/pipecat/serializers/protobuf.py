@@ -8,6 +8,7 @@
 
 import dataclasses
 import json
+from typing import Optional
 
 from loguru import logger
 
@@ -16,7 +17,6 @@ from pipecat.frames.frames import (
     Frame,
     InputAudioRawFrame,
     InputTransportMessageFrame,
-    InterruptionFrame,
     OutputAudioRawFrame,
     OutputTransportMessageFrame,
     OutputTransportMessageUrgentFrame,
@@ -50,7 +50,6 @@ class ProtobufFrameSerializer(FrameSerializer):
         OutputAudioRawFrame: "audio",
         TranscriptionFrame: "transcription",
         MessageFrame: "message",
-        InterruptionFrame: "interruption",
     }
     SERIALIZABLE_FIELDS = {v: k for k, v in SERIALIZABLE_TYPES.items()}
 
@@ -59,22 +58,16 @@ class ProtobufFrameSerializer(FrameSerializer):
         InputAudioRawFrame: "audio",
         TranscriptionFrame: "transcription",
         MessageFrame: "message",
-        InterruptionFrame: "interruption",
     }
     DESERIALIZABLE_FIELDS = {v: k for k, v in DESERIALIZABLE_TYPES.items()}
 
-    def __init__(self, params: FrameSerializer.InputParams | None = None):
+    def __init__(self, params: Optional[FrameSerializer.InputParams] = None):
         """Initialize the Protobuf frame serializer.
 
         Args:
             params: Configuration parameters.
         """
         super().__init__(params)
-        # The base serializer defaults to filtering out RTVI protocol messages
-        # to avoid sending them over telephony media streams. ProtobufFrameSerializer
-        # is used by WebSocket transports, which are the delivery channel for
-        # these messages, so we disable the filter.
-        self._params.ignore_rtvi_messages = False
 
     async def serialize(self, frame: Frame) -> str | bytes | None:
         """Serialize a frame to Protocol Buffer binary format.
@@ -86,24 +79,23 @@ class ProtobufFrameSerializer(FrameSerializer):
             Serialized frame as bytes, or None if frame type is not serializable.
         """
         # Wrapping this messages as a JSONFrame to send
-        serializable: Frame | MessageFrame = frame
         if isinstance(frame, (OutputTransportMessageFrame, OutputTransportMessageUrgentFrame)):
             if self.should_ignore_frame(frame):
                 return None
-            serializable = MessageFrame(
+            frame = MessageFrame(
                 data=json.dumps(frame.message),
             )
 
-        proto_frame = frame_protos.Frame()  # type: ignore[attr-defined]
-        if type(serializable) not in self.SERIALIZABLE_TYPES:
-            logger.warning(f"Frame type {type(serializable)} is not serializable")
+        proto_frame = frame_protos.Frame()
+        if type(frame) not in self.SERIALIZABLE_TYPES:
+            logger.warning(f"Frame type {type(frame)} is not serializable")
             return None
 
         # ignoring linter errors; we check that type(frame) is in this dict above
-        proto_optional_name = self.SERIALIZABLE_TYPES[type(serializable)]  # type: ignore
+        proto_optional_name = self.SERIALIZABLE_TYPES[type(frame)]  # type: ignore
         proto_attr = getattr(proto_frame, proto_optional_name)
-        for field in dataclasses.fields(serializable):  # type: ignore
-            value = getattr(serializable, field.name)
+        for field in dataclasses.fields(frame):  # type: ignore
+            value = getattr(frame, field.name)
             if value and hasattr(proto_attr, field.name):
                 setattr(proto_attr, field.name, value)
 
@@ -118,7 +110,7 @@ class ProtobufFrameSerializer(FrameSerializer):
         Returns:
             Deserialized frame instance, or None if deserialization fails.
         """
-        proto = frame_protos.Frame.FromString(data)  # type: ignore[attr-defined]
+        proto = frame_protos.Frame.FromString(data)
         which = proto.WhichOneof("frame")
         if which not in self.DESERIALIZABLE_FIELDS:
             logger.error("Unable to deserialize a valid frame")

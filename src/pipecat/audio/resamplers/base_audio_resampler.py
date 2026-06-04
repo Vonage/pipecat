@@ -11,10 +11,6 @@ providing a common interface for converting audio between different sample rates
 """
 
 from abc import ABC, abstractmethod
-from typing import Literal
-
-SoxrQuality = Literal["QQ", "LQ", "MQ", "HQ", "VHQ"]
-"""SOXR resampling quality presets, from fastest (QQ) to highest quality (VHQ)."""
 
 
 class BaseAudioResampler(ABC):

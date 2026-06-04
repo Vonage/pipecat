@@ -6,6 +6,8 @@
 
 """Langchain integration processor for Pipecat."""
 
+from typing import Optional, Union
+
 from loguru import logger
 
 from pipecat.frames.frames import (
@@ -15,6 +17,7 @@ from pipecat.frames.frames import (
     LLMFullResponseStartFrame,
     TextFrame,
 )
+from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContextFrame
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 try:
@@ -22,7 +25,7 @@ try:
     from langchain_core.runnables import Runnable
 except ModuleNotFoundError as e:
     logger.error("In order to use Langchain, you need to `pip install pipecat-ai[langchain]`. ")
-    raise ImportError(f"Missing module: {e}") from e
+    raise Exception(f"Missing module: {e}")
 
 
 class LangchainProcessor(FrameProcessor):
@@ -43,7 +46,7 @@ class LangchainProcessor(FrameProcessor):
         super().__init__()
         self._chain = chain
         self._transcript_key = transcript_key
-        self._participant_id: str | None = None
+        self._participant_id: Optional[str] = None
 
     def set_participant_id(self, participant_id: str):
         """Set the participant ID for session tracking.
@@ -62,30 +65,23 @@ class LangchainProcessor(FrameProcessor):
         """
         await super().process_frame(frame, direction)
 
-        if isinstance(frame, LLMContextFrame):
+        if isinstance(frame, (LLMContextFrame, OpenAILLMContextFrame)):
             # Messages are accumulated on the context as a list of messages.
             # The last one by the human is the one we want to send to the LLM.
             logger.debug(f"Got transcription frame {frame}")
-            messages = frame.context.get_messages()
-            # Historically this processor has only handled plain-text user
-            # messages; the guards below make that contract explicit for the
-            # type checker. TODO: maybe handle other message shapes (provider-
-            # specific messages, multi-modal content lists, etc.).
-            last_message = messages[-1] if messages else None
-            if not isinstance(last_message, dict):
-                await self.push_frame(frame, direction)
-                return
-            content = last_message.get("content")
-            if not isinstance(content, str):
-                await self.push_frame(frame, direction)
-                return
+            messages = (
+                frame.context.messages
+                if isinstance(frame, OpenAILLMContextFrame)
+                else frame.context.get_messages()
+            )
+            text: str = messages[-1]["content"]
 
-            await self._ainvoke(content.strip())
+            await self._ainvoke(text.strip())
         else:
             await self.push_frame(frame, direction)
 
     @staticmethod
-    def __get_token_value(text: str | AIMessageChunk) -> str:
+    def __get_token_value(text: Union[str, AIMessageChunk]) -> str:
         """Extract token value from various text types.
 
         Args:
@@ -98,10 +94,7 @@ class LangchainProcessor(FrameProcessor):
             case str():
                 return text
             case AIMessageChunk():
-                # `content` is `str | list[...]` (multi-modal); stringify if
-                # it's a list, since downstream consumers want plain text.
-                content = text.content
-                return content if isinstance(content, str) else str(content)
+                return text.content
             case _:
                 return ""
 

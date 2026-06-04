@@ -37,9 +37,8 @@ Key helpers:
 from __future__ import annotations
 
 import copy
-from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, Any, ClassVar, TypeGuard, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Dict, Mapping, Optional, Type, TypeVar
 
 from loguru import logger
 
@@ -47,7 +46,6 @@ from pipecat.transcriptions.language import Language
 
 if TYPE_CHECKING:
     from pipecat.turns.user_turn_completion_mixin import UserTurnCompletionConfig
-
 
 # ---------------------------------------------------------------------------
 # NOT_GIVEN sentinel
@@ -66,7 +64,7 @@ class _NotGiven:
     ``validate_complete()``.
     """
 
-    _instance: _NotGiven | None = None
+    _instance: Optional[_NotGiven] = None
 
     def __new__(cls) -> _NotGiven:
         if cls._instance is None:
@@ -88,10 +86,7 @@ Valid only in delta-mode settings objects.  Must never appear in a service's
 """
 
 
-_T = TypeVar("_T")
-
-
-def is_given(value: _T | _NotGiven) -> TypeGuard[_T]:
+def is_given(value: Any) -> bool:
     """Check whether a delta field was explicitly provided.
 
     Typically used when processing a delta to decide whether a field
@@ -100,10 +95,6 @@ def is_given(value: _T | _NotGiven) -> TypeGuard[_T]:
         if is_given(delta.voice):
             # caller wants to change the voice
             ...
-
-    Also acts as a type guard: inside a true branch, the value is narrowed
-    to exclude ``_NotGiven`` (e.g. ``str | None | _NotGiven`` becomes
-    ``str | None``).
 
     For store-mode objects this always returns ``True`` (since
     ``validate_complete`` ensures no ``NOT_GIVEN`` fields remain).
@@ -115,31 +106,6 @@ def is_given(value: _T | _NotGiven) -> TypeGuard[_T]:
         ``True`` if *value* is anything other than ``NOT_GIVEN``.
     """
     return not isinstance(value, _NotGiven)
-
-
-def assert_given(value: _T | _NotGiven) -> _T:
-    """Extract a store-mode settings field, asserting it isn't ``NOT_GIVEN``.
-
-    Intended for reads from a store-mode settings object, where
-    ``_NotGiven`` should never appear (see ``validate_complete``).  Narrows
-    away ``_NotGiven`` at the type level and raises at runtime if the
-    invariant is violated::
-
-        resolved_model = assert_given(self._settings.model)  # narrowed str | None
-
-    Args:
-        value: The store-mode field value to extract.
-
-    Returns:
-        The value, narrowed to exclude ``_NotGiven``.
-
-    Raises:
-        RuntimeError: If *value* is ``NOT_GIVEN`` (a store-mode invariant
-            violation).
-    """
-    if not is_given(value):
-        raise RuntimeError("Store-mode settings field is NOT_GIVEN (invariant violated)")
-    return value
 
 
 # ---------------------------------------------------------------------------
@@ -186,12 +152,12 @@ class ServiceSettings:
     model string or ``None`` if the service has no model concept.
     """
 
-    extra: dict[str, Any] = field(default_factory=dict)
+    extra: Dict[str, Any] = field(default_factory=dict)
     """Catch-all for service-specific keys that have no declared field."""
 
     # -- class-level configuration -------------------------------------------
 
-    _aliases: ClassVar[dict[str, str]] = {}
+    _aliases: ClassVar[Dict[str, str]] = {}
     """Map of alternative key names to canonical field names.
 
     For example ``{"voice_id": "voice"}`` lets callers use either spelling.
@@ -200,7 +166,7 @@ class ServiceSettings:
 
     # -- public API ----------------------------------------------------------
 
-    def given_fields(self) -> dict[str, Any]:
+    def given_fields(self) -> Dict[str, Any]:
         """Return a dict of only the fields that are not ``NOT_GIVEN``.
 
         Primarily useful for delta-mode objects to inspect which fields were
@@ -213,7 +179,7 @@ class ServiceSettings:
         Returns:
             Dictionary mapping field names to their provided values.
         """
-        result: dict[str, Any] = {}
+        result: Dict[str, Any] = {}
         for f in fields(self):
             if f.name == "extra":
                 continue
@@ -223,7 +189,7 @@ class ServiceSettings:
         result.update(self.extra)
         return result
 
-    def apply_update(self: _S, delta: _S) -> dict[str, Any]:
+    def apply_update(self: _S, delta: _S) -> Dict[str, Any]:
         """Merge a delta-mode object into this store-mode object.
 
         Only fields in *delta* that are **given** (i.e. not ``NOT_GIVEN``)
@@ -251,7 +217,7 @@ class ServiceSettings:
             # changed == {"voice": "alice"}
             # current.voice == "bob", current.language == "en"
         """
-        changed: dict[str, Any] = {}
+        changed: Dict[str, Any] = {}
         for f in fields(self):
             if f.name == "extra":
                 continue
@@ -273,7 +239,7 @@ class ServiceSettings:
         return changed
 
     @classmethod
-    def from_mapping(cls: type[_S], settings: Mapping[str, Any]) -> _S:
+    def from_mapping(cls: Type[_S], settings: Mapping[str, Any]) -> _S:
         """Build a **delta-mode** settings object from a plain dictionary.
 
         This exists for backward compatibility with code that passes plain
@@ -299,8 +265,8 @@ class ServiceSettings:
             # delta.extra == {"speed": 1.2}
         """
         field_names = {f.name for f in fields(cls)} - {"extra"}
-        kwargs: dict[str, Any] = {}
-        extra: dict[str, Any] = {}
+        kwargs: Dict[str, Any] = {}
+        extra: Dict[str, Any] = {}
 
         for key, value in settings.items():
             # Resolve aliases first
@@ -388,7 +354,6 @@ class LLMSettings(ServiceSettings):
 
     Parameters:
         model: LLM model identifier.
-        system_instruction: System instruction/prompt for the model.
         temperature: Sampling temperature.
         max_tokens: Maximum tokens to generate.
         top_p: Nucleus sampling probability.
@@ -398,14 +363,13 @@ class LLMSettings(ServiceSettings):
         seed: Random seed for reproducibility.
         filter_incomplete_user_turns: Enable LLM-based turn completion detection
             to suppress bot responses when the user was cut off mid-thought.
-            See ``examples/22-filter-incomplete-turns.py`` and
+            See ``examples/foundational/22-filter-incomplete-turns.py`` and
             ``UserTurnCompletionLLMServiceMixin``.
         user_turn_completion_config: Configuration for turn completion behavior
             when ``filter_incomplete_user_turns`` is enabled. Controls timeouts
             and prompts for incomplete turns.
     """
 
-    system_instruction: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     temperature: float | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     max_tokens: int | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     top_p: float | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
@@ -440,10 +404,10 @@ class TTSSettings(ServiceSettings):
             ``__init__`` methods do the same at construction time.
     """
 
-    voice: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    voice: str | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     language: Language | str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
 
-    _aliases: ClassVar[dict[str, str]] = {"voice_id": "voice"}
+    _aliases: ClassVar[Dict[str, str]] = {"voice_id": "voice"}
 
 
 @dataclass

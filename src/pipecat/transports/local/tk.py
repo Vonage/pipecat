@@ -13,6 +13,7 @@ PyAudio for audio I/O, suitable for desktop applications and testing.
 import asyncio
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
 
 import numpy as np
 from loguru import logger
@@ -34,14 +35,14 @@ except ModuleNotFoundError as e:
     logger.error(
         "In order to use local audio, you need to `pip install pipecat-ai[local]`. On MacOS, you also need to `brew install portaudio`."
     )
-    raise ImportError(f"Missing module: {e}") from e
+    raise Exception(f"Missing module: {e}")
 
 try:
     import tkinter as tk
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
     logger.error("tkinter missing. Try `apt install python3-tk` or `brew install python-tk@3.10`.")
-    raise ImportError(f"Missing module: {e}") from e
+    raise Exception(f"Missing module: {e}")
 
 
 class TkTransportParams(TransportParams):
@@ -52,8 +53,8 @@ class TkTransportParams(TransportParams):
         audio_output_device_index: PyAudio device index for audio output. If None, uses default.
     """
 
-    audio_input_device_index: int | None = None
-    audio_output_device_index: int | None = None
+    audio_input_device_index: Optional[int] = None
+    audio_output_device_index: Optional[int] = None
 
 
 class TkInputTransport(BaseInputTransport):
@@ -228,7 +229,7 @@ class TkOutputTransport(BaseOutputTransport):
 
         # This holds a reference to the photo, preventing it from being garbage
         # collected.
-        self._image_label.image = photo  # type: ignore[attr-defined]
+        self._image_label.image = photo
 
 
 class TkLocalTransport(BaseTransport):
@@ -250,8 +251,8 @@ class TkLocalTransport(BaseTransport):
         self._params = params
         self._pyaudio = pyaudio.PyAudio()
 
-        self._input: TkInputTransport | None = None
-        self._output: TkOutputTransport | None = None
+        self._input: Optional[TkInputTransport] = None
+        self._output: Optional[TkOutputTransport] = None
 
     #
     # BaseTransport

@@ -11,10 +11,10 @@ key on the telephone keypad, facilitating the handling of input in
 telecommunication applications.
 """
 
-from enum import StrEnum
+from enum import Enum
 
 
-class KeypadEntry(StrEnum):
+class KeypadEntry(str, Enum):
     """DTMF keypad entries for phone system integration.
 
     Parameters:

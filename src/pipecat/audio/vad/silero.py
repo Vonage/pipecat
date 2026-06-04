@@ -12,6 +12,7 @@ Supports 8kHz and 16kHz sample rates.
 """
 
 import time
+from typing import Optional
 
 import numpy as np
 from loguru import logger
@@ -26,8 +27,8 @@ try:
 
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
-    logger.error("In order to use Silero VAD, you need to `pip install pipecat-ai`.")
-    raise ImportError(f"Missing module(s): {e}") from e
+    logger.error("In order to use Silero VAD, you need to `pip install pipecat-ai[silero]`.")
+    raise Exception(f"Missing module(s): {e}")
 
 
 class SileroOnnxModel:
@@ -134,7 +135,7 @@ class SileroVADAnalyzer(VADAnalyzer):
     with automatic model state management and periodic resets.
     """
 
-    def __init__(self, *, sample_rate: int | None = None, params: VADParams | None = None):
+    def __init__(self, *, sample_rate: Optional[int] = None, params: Optional[VADParams] = None):
         """Initialize the Silero VAD analyzer.
 
         Args:

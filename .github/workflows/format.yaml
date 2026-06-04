@@ -32,9 +32,7 @@ jobs:
         run: uv python install 3.12
 
       - name: Install development dependencies
-        # `--all-extras` (matching the dev setup in README.md) so pyright can
-        # resolve types from various optional dependencies.
-        run: uv sync --group dev --all-extras --no-extra gstreamer --no-extra local
+        run: uv sync --group dev
 
       - name: Ruff formatter
         id: ruff-format
@@ -43,7 +41,3 @@ jobs:
       - name: Ruff linter (all rules)
         id: ruff-check
         run: uv run ruff check
-
-      - name: Type check (pyright)
-        id: pyright
-        run: uv run pyright

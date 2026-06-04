@@ -7,6 +7,7 @@
 """GStreamer pipeline source integration for Pipecat."""
 
 import asyncio
+from typing import Optional
 
 from loguru import logger
 from pydantic import BaseModel
@@ -27,13 +28,13 @@ try:
 
     gi.require_version("Gst", "1.0")
     gi.require_version("GstApp", "1.0")
-    from gi.repository import Gst, GstApp  # pyright: ignore[reportAttributeAccessIssue]
+    from gi.repository import Gst, GstApp
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
     logger.error(
         "In order to use GStreamer, you need to `pip install pipecat-ai[gstreamer]`. Also, you need to install GStreamer in your system."
     )
-    raise ImportError(f"Missing module: {e}") from e
+    raise Exception(f"Missing module: {e}")
 
 
 class GStreamerPipelineSource(FrameProcessor):
@@ -57,11 +58,11 @@ class GStreamerPipelineSource(FrameProcessor):
 
         video_width: int = 1280
         video_height: int = 720
-        audio_sample_rate: int | None = None
+        audio_sample_rate: Optional[int] = None
         audio_channels: int = 1
         clock_sync: bool = True
 
-    def __init__(self, *, pipeline: str, out_params: OutputParams | None = None, **kwargs):
+    def __init__(self, *, pipeline: str, out_params: Optional[OutputParams] = None, **kwargs):
         """Initialize the GStreamer pipeline source.
 
         Args:

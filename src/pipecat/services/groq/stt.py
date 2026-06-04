@@ -6,25 +6,11 @@
 
 """Groq speech-to-text service implementation using Whisper models."""
 
-from dataclasses import dataclass
+from typing import Optional
 
 from pipecat.services.stt_latency import GROQ_TTFS_P99
-from pipecat.services.whisper.base_stt import (
-    BaseWhisperSTTService,
-    Transcription,
-)
+from pipecat.services.whisper.base_stt import BaseWhisperSTTService, Transcription
 from pipecat.transcriptions.language import Language
-
-
-@dataclass
-class GroqSTTSettings(BaseWhisperSTTService.Settings):
-    """Settings for the Groq STT service.
-
-    Parameters:
-        prompt: Optional prompt text to guide transcription style.
-    """
-
-    pass
 
 
 class GroqSTTService(BaseWhisperSTTService):
@@ -34,91 +20,44 @@ class GroqSTTService(BaseWhisperSTTService):
     set via the api_key parameter or GROQ_API_KEY environment variable.
     """
 
-    Settings = GroqSTTSettings
-    _settings: Settings
-
     def __init__(
         self,
         *,
-        model: str | None = None,
-        api_key: str | None = None,
+        model: str = "whisper-large-v3-turbo",
+        api_key: Optional[str] = None,
         base_url: str = "https://api.groq.com/openai/v1",
-        language: Language | None = None,
-        prompt: str | None = None,
-        temperature: float | None = None,
-        settings: Settings | None = None,
-        ttfs_p99_latency: float | None = GROQ_TTFS_P99,
+        language: Optional[Language] = Language.EN,
+        prompt: Optional[str] = None,
+        temperature: Optional[float] = None,
+        ttfs_p99_latency: Optional[float] = GROQ_TTFS_P99,
         **kwargs,
     ):
         """Initialize Groq STT service.
 
         Args:
-            model: Whisper model to use.
-
-                .. deprecated:: 0.0.105
-                    Use ``settings=GroqSTTService.Settings(model=...)`` instead.
-
+            model: Whisper model to use. Defaults to "whisper-large-v3-turbo".
             api_key: Groq API key. Defaults to None.
             base_url: API base URL. Defaults to "https://api.groq.com/openai/v1".
-            language: Language of the audio input.
-
-                .. deprecated:: 0.0.105
-                    Use ``settings=GroqSTTService.Settings(language=...)`` instead.
-
+            language: Language of the audio input. Defaults to English.
             prompt: Optional text to guide the model's style or continue a previous segment.
-
-                .. deprecated:: 0.0.105
-                    Use ``settings=GroqSTTService.Settings(prompt=...)`` instead.
-
-            temperature: Optional sampling temperature between 0 and 1.
-
-                .. deprecated:: 0.0.105
-                    Use ``settings=GroqSTTService.Settings(temperature=...)`` instead.
-
-            settings: Runtime-updatable settings. When provided alongside deprecated
-                parameters, ``settings`` values take precedence.
+            temperature: Optional sampling temperature between 0 and 1. Defaults to 0.0.
             ttfs_p99_latency: P99 latency from speech end to final transcript in seconds.
                 Override for your deployment. See https://github.com/pipecat-ai/stt-benchmark
             **kwargs: Additional arguments passed to BaseWhisperSTTService.
         """
-        # --- 1. Hardcoded defaults ---
-        default_settings = self.Settings(
-            model="whisper-large-v3-turbo",
-            language=Language.EN,
-            prompt=None,
-            temperature=None,
-        )
-
-        # --- 2. Deprecated direct-arg overrides ---
-        if model is not None:
-            self._warn_init_param_moved_to_settings("model", "model")
-            default_settings.model = model
-        if language is not None:
-            self._warn_init_param_moved_to_settings("language", "language")
-            default_settings.language = language
-        if prompt is not None:
-            self._warn_init_param_moved_to_settings("prompt", "prompt")
-            default_settings.prompt = prompt
-        if temperature is not None:
-            self._warn_init_param_moved_to_settings("temperature", "temperature")
-            default_settings.temperature = temperature
-
-        # --- 3. (no params object for this service) ---
-
-        # --- 4. Settings delta (canonical API, always wins) ---
-        if settings is not None:
-            default_settings.apply_update(settings)
-
         super().__init__(
+            model=model,
             api_key=api_key,
             base_url=base_url,
-            settings=default_settings,
+            language=language,
+            prompt=prompt,
+            temperature=temperature,
             ttfs_p99_latency=ttfs_p99_latency,
             **kwargs,
         )
 
     async def _transcribe(self, audio: bytes) -> Transcription:
-        assert self._settings.language is not None
+        assert self._language is not None  # Assigned in the BaseWhisperSTTService class
 
         # Build kwargs dict with only set parameters
         kwargs = {
@@ -126,13 +65,13 @@ class GroqSTTService(BaseWhisperSTTService):
             "model": self._settings.model,
             # Use verbose_json to get probability metrics
             "response_format": "verbose_json" if self._include_prob_metrics else "json",
-            "language": self._settings.language,
+            "language": self._language,
         }
 
-        if self._settings.prompt is not None:
-            kwargs["prompt"] = self._settings.prompt
+        if self._prompt is not None:
+            kwargs["prompt"] = self._prompt
 
-        if self._settings.temperature is not None:
-            kwargs["temperature"] = self._settings.temperature
+        if self._temperature is not None:
+            kwargs["temperature"] = self._temperature
 
         return await self._client.audio.transcriptions.create(**kwargs)

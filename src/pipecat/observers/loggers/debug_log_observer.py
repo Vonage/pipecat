@@ -13,6 +13,7 @@ understanding frame flow between processors.
 
 from dataclasses import fields, is_dataclass
 from enum import Enum, auto
+from typing import Dict, Optional, Set, Tuple, Type, Union
 
 from loguru import logger
 
@@ -74,10 +75,10 @@ class DebugLogObserver(BaseObserver):
 
     def __init__(
         self,
-        frame_types: tuple[type[Frame], ...]
-        | dict[type[Frame], tuple[type, FrameEndpoint] | None]
-        | None = None,
-        exclude_fields: set[str] | None = None,
+        frame_types: Optional[
+            Union[Tuple[Type[Frame], ...], Dict[Type[Frame], Optional[Tuple[Type, FrameEndpoint]]]]
+        ] = None,
+        exclude_fields: Optional[Set[str]] = None,
         **kwargs,
     ):
         """Initialize the debug log observer.

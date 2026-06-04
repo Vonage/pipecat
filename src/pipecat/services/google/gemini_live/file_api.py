@@ -12,7 +12,7 @@ this API can be referenced in Gemini generative model calls.
 """
 
 import mimetypes
-from typing import Any
+from typing import Any, Dict, Optional
 
 import aiohttp
 from loguru import logger
@@ -43,7 +43,9 @@ class GeminiFileAPI:
         # Upload URL uses the /upload/ path
         self.upload_base_url = "https://generativelanguage.googleapis.com/upload/v1beta/files"
 
-    async def upload_file(self, file_path: str, display_name: str | None = None) -> dict[str, Any]:
+    async def upload_file(
+        self, file_path: str, display_name: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Upload a file to the Gemini File API using the correct resumable upload protocol.
 
         Args:
@@ -114,7 +116,7 @@ class GeminiFileAPI:
                 logger.info(f"File uploaded successfully: {file_info.get('file', {}).get('name')}")
                 return file_info
 
-    async def get_file(self, name: str) -> dict[str, Any]:
+    async def get_file(self, name: str) -> Dict[str, Any]:
         """Get metadata for a file.
 
         Args:
@@ -138,8 +140,8 @@ class GeminiFileAPI:
                 return file_info
 
     async def list_files(
-        self, page_size: int = 10, page_token: str | None = None
-    ) -> dict[str, Any]:
+        self, page_size: int = 10, page_token: Optional[str] = None
+    ) -> Dict[str, Any]:
         """List uploaded files.
 
         Args:

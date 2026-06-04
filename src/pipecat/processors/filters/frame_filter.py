@@ -6,6 +6,8 @@
 
 """Frame filtering processor for the Pipecat framework."""
 
+from typing import Tuple, Type
+
 from pipecat.frames.frames import EndFrame, Frame, SystemFrame
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
@@ -18,7 +20,7 @@ class FrameFilter(FrameProcessor):
     automatically allowed to pass through to maintain pipeline integrity.
     """
 
-    def __init__(self, types: tuple[type[Frame], ...]):
+    def __init__(self, types: Tuple[Type[Frame], ...]):
         """Initialize the frame filter.
 
         Args:

@@ -12,6 +12,7 @@ when a user has finished speaking in a conversation.
 
 from abc import ABC, abstractmethod
 from enum import Enum
+from typing import Optional, Tuple
 
 from pydantic import BaseModel
 
@@ -43,7 +44,7 @@ class BaseTurnAnalyzer(ABC):
     while still defining an abstract interface through abstract methods.
     """
 
-    def __init__(self, *, sample_rate: int | None = None):
+    def __init__(self, *, sample_rate: Optional[int] = None):
         """Initialize the turn analyzer.
 
         Args:
@@ -107,7 +108,7 @@ class BaseTurnAnalyzer(ABC):
         pass
 
     @abstractmethod
-    async def analyze_end_of_turn(self) -> tuple[EndOfTurnState, MetricsData | None]:
+    async def analyze_end_of_turn(self) -> Tuple[EndOfTurnState, Optional[MetricsData]]:
         """Analyzes if an end of turn has occurred based on the audio input.
 
         Returns:

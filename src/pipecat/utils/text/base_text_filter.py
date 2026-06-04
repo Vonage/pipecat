@@ -12,8 +12,7 @@ and interruption handling.
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
-from typing import Any
+from typing import Any, Mapping
 
 
 class BaseTextFilter(ABC):

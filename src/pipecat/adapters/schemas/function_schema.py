@@ -11,7 +11,7 @@ tools and functions used with AI models, ensuring consistent formatting
 across different AI service providers.
 """
 
-from typing import Any
+from typing import Any, Dict, List
 
 
 class FunctionSchema:
@@ -23,7 +23,7 @@ class FunctionSchema:
     """
 
     def __init__(
-        self, name: str, description: str, properties: dict[str, Any], required: list[str]
+        self, name: str, description: str, properties: Dict[str, Any], required: List[str]
     ) -> None:
         """Initialize the function schema.
 
@@ -38,7 +38,7 @@ class FunctionSchema:
         self._properties = properties
         self._required = required
 
-    def to_default_dict(self) -> dict[str, Any]:
+    def to_default_dict(self) -> Dict[str, Any]:
         """Converts the function schema to a dictionary.
 
         Returns:
@@ -73,7 +73,7 @@ class FunctionSchema:
         return self._description
 
     @property
-    def properties(self) -> dict[str, Any]:
+    def properties(self) -> Dict[str, Any]:
         """Get the function properties.
 
         Returns:
@@ -82,7 +82,7 @@ class FunctionSchema:
         return self._properties
 
     @property
-    def required(self) -> list[str]:
+    def required(self) -> List[str]:
         """Get the required parameters.
 
         Returns:

@@ -10,10 +10,9 @@ This module provides a client for handling web requests and managing WebRTC conn
 """
 
 import asyncio
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from aiortc.sdp import candidate_from_sdp
 from fastapi import HTTPException
@@ -36,9 +35,9 @@ class SmallWebRTCRequest:
 
     sdp: str
     type: str
-    pc_id: str | None = None
-    restart_pc: bool | None = None
-    request_data: Any | None = None
+    pc_id: Optional[str] = None
+    restart_pc: Optional[bool] = None
+    request_data: Optional[Any] = None
 
     @classmethod
     def from_dict(cls, data: dict):
@@ -73,7 +72,7 @@ class SmallWebRTCPatchRequest:
     """
 
     pc_id: str
-    candidates: list[IceCandidate]
+    candidates: List[IceCandidate]
 
 
 class ConnectionMode(Enum):
@@ -96,9 +95,9 @@ class SmallWebRTCRequestHandler:
 
     def __init__(
         self,
-        ice_servers: list[IceServer] | None = None,
+        ice_servers: Optional[List[IceServer]] = None,
         esp32_mode: bool = False,
-        host: str | None = None,
+        host: Optional[str] = None,
         connection_mode: ConnectionMode = ConnectionMode.MULTIPLE,
     ) -> None:
         """Initialize a SmallWebRTC request handler.
@@ -118,9 +117,9 @@ class SmallWebRTCRequestHandler:
         self._connection_mode = connection_mode
 
         # Store connections by pc_id
-        self._pcs_map: dict[str, SmallWebRTCConnection] = {}
+        self._pcs_map: Dict[str, SmallWebRTCConnection] = {}
 
-    def _check_single_connection_constraints(self, pc_id: str | None) -> None:
+    def _check_single_connection_constraints(self, pc_id: Optional[str]) -> None:
         """Check if the connection request satisfies single connection mode constraints.
 
         Args:
@@ -153,7 +152,7 @@ class SmallWebRTCRequestHandler:
                 detail="Cannot create new connection with existing connection active",
             )
 
-    def update_ice_servers(self, ice_servers: list[IceServer] | None = None):
+    def update_ice_servers(self, ice_servers: Optional[List[IceServer]] = None):
         """Update the list of ICE servers used for WebRTC connections."""
         self._ice_servers = ice_servers
 
@@ -161,7 +160,7 @@ class SmallWebRTCRequestHandler:
         self,
         request: SmallWebRTCRequest,
         webrtc_connection_callback: Callable[[Any], Awaitable[None]],
-    ) -> dict[str, str] | None:
+    ) -> Optional[Dict[str, str]]:
         """Handle a SmallWebRTC request and resolve the pending answer.
 
         This method will:
@@ -224,8 +223,6 @@ class SmallWebRTCRequestHandler:
                     )
 
             answer = pipecat_connection.get_answer()
-            if answer is None:
-                raise RuntimeError("SmallWebRTC connection produced no SDP answer")
 
             if self._esp32_mode:
                 from pipecat.runner.utils import smallwebrtc_sdp_munging

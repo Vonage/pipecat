@@ -10,7 +10,7 @@ This module provides helper classes for interacting with the LemonSlice API,
 including session creation and termination.
 """
 
-from typing import Any
+from typing import Any, Optional
 
 import aiohttp
 from loguru import logger
@@ -38,15 +38,13 @@ class LemonSliceApi:
     async def create_session(
         self,
         *,
-        agent_image_url: str | None = None,
-        agent_id: str | None = None,
-        agent_prompt: str | None = None,
-        idle_timeout: int | None = None,
-        daily_room_url: str | None = None,
-        daily_token: str | None = None,
-        connection_properties: dict[str, Any] | None = None,
-        extra_properties: dict[str, Any] | None = None,
-        api_url: str | None = None,
+        agent_image_url: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        agent_prompt: Optional[str] = None,
+        idle_timeout: Optional[int] = None,
+        daily_room_url: Optional[str] = None,
+        daily_token: Optional[str] = None,
+        properties: Optional[dict[str, Any]] = None,
     ) -> dict:
         """Create a new session with the specified agent_id or agent_image_url.
 
@@ -57,9 +55,7 @@ class LemonSliceApi:
             idle_timeout: Idle timeout in seconds.
             daily_room_url: Daily room URL to use for the session.
             daily_token: Daily token for authenticating with the room.
-            connection_properties: Additional connection properties to pass to the session.
-            extra_properties: Additional properties to pass to the session.
-            api_url: LemonSlice API URL override.
+            properties: Additional properties to pass to the session.
 
         Returns:
             Dictionary containing session_id, room_url, and control_url.
@@ -68,14 +64,16 @@ class LemonSliceApi:
             ValueError: If neither agent_id nor agent_image_url is provided.
         """
         if not agent_id and not agent_image_url:
-            raise ValueError("Provide an agent_id or agent_image_url")
+            # Fallback to a default agent if none is provided
+            logger.debug("No agent_id or agent_image_url provided, using default agent")
+            agent_id = "agent_080308d8b6e99f47"
         if agent_id and agent_image_url:
             raise ValueError("Provide exactly one of agent_id or agent_image_url, not both")
 
         logger.debug(
             f"Creating LemonSlice session: agent_id={agent_id}, agent_image_url={agent_image_url}"
         )
-        payload: dict[str, Any] = {"transport_type": "daily"}
+        payload: dict[str, object] = {"transport_type": "daily"}
         if agent_id is not None:
             payload["agent_id"] = agent_id
         if agent_image_url is not None:
@@ -84,19 +82,16 @@ class LemonSliceApi:
             payload["agent_prompt"] = agent_prompt
         if idle_timeout is not None:
             payload["idle_timeout"] = idle_timeout
-        properties_dict: dict[str, Any] = (
-            dict(connection_properties) if connection_properties else {}
-        )
+        properties_dict: dict[str, Any] = dict(properties) if properties else {}
         if daily_room_url is not None:
             properties_dict["daily_url"] = daily_room_url
         if daily_token is not None:
             properties_dict["daily_token"] = daily_token
         if properties_dict:
             payload["properties"] = properties_dict
-        if extra_properties:
-            payload.update(extra_properties)
-        url = api_url if api_url is not None else self.LEMONSLICE_URL
-        async with self._session.post(url, headers=self._headers, json=payload) as r:
+        async with self._session.post(
+            self.LEMONSLICE_URL, headers=self._headers, json=payload
+        ) as r:
             r.raise_for_status()
             response = await r.json()
             logger.debug(f"Created LemonSlice session: {response}")

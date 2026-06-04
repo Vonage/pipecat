@@ -4,22 +4,17 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
-"""Synchronized parallel pipeline that holds output until all branches finish.
+"""Synchronous parallel pipeline implementation for concurrent frame processing.
 
-A SyncParallelPipeline fans each inbound frame out to multiple parallel pipelines
-and waits for every pipeline to finish processing before releasing any of the
-resulting output frames. This ensures that all frames produced in response to a
-single input frame are emitted together.
-
-System frames (except EndFrame) are exempt from this synchronization — they pass
-straight through without waiting, since they are expected to race ahead of
-regular data frames.
+This module provides a pipeline that processes frames through multiple parallel
+pipelines simultaneously, synchronizing their output to maintain frame ordering
+and prevent duplicate processing.
 """
 
 import asyncio
 from dataclasses import dataclass
-from enum import Enum
 from itertools import chain
+from typing import List
 
 from loguru import logger
 
@@ -29,42 +24,22 @@ from pipecat.pipeline.pipeline import Pipeline
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor, FrameProcessorSetup
 
 
-class FrameOrder(Enum):
-    """Controls the order in which synchronized frames are pushed downstream.
-
-    When multiple parallel pipelines produce output for the same input frame,
-    this setting determines the order in which those output frames are pushed.
-
-    Parameters:
-        ARRIVAL: Frames are pushed in the order they arrive from any pipeline.
-            This is the default and matches the behavior of prior versions.
-        PIPELINE: Frames are pushed in pipeline definition order — all frames
-            from the first pipeline are pushed, then all frames from the second
-            pipeline, and so on. Useful when the relative ordering between
-            pipelines matters (e.g. ensuring image frames precede audio frames).
-    """
-
-    ARRIVAL = "arrival"
-    PIPELINE = "pipeline"
-
-
 @dataclass
 class SyncFrame(ControlFrame):
-    """Sentinel frame used to detect when a parallel pipeline has finished processing.
+    """Control frame used to synchronize parallel pipeline processing.
 
-    After sending a real frame into a parallel pipeline, a SyncFrame is sent
-    behind it. When the SyncFrame emerges from the pipeline's output, we know
-    all output frames for the preceding input have been produced.
+    This frame is sent through parallel pipelines to determine when the
+    internal pipelines have finished processing a batch of frames.
     """
 
     pass
 
 
 class SyncParallelPipelineSource(FrameProcessor):
-    """Bookend processor placed at the start of each parallel pipeline.
+    """Source processor for synchronous parallel pipeline processing.
 
-    Forwards downstream frames into the pipeline and captures upstream frames
-    into a queue so the parent SyncParallelPipeline can release them later.
+    Routes frames to parallel pipelines and collects upstream responses
+    for synchronization purposes.
     """
 
     def __init__(self, upstream_queue: asyncio.Queue):
@@ -93,11 +68,10 @@ class SyncParallelPipelineSource(FrameProcessor):
 
 
 class SyncParallelPipelineSink(FrameProcessor):
-    """Bookend processor placed at the end of each parallel pipeline.
+    """Sink processor for synchronous parallel pipeline processing.
 
-    Captures downstream output frames into a queue so the parent
-    SyncParallelPipeline can release them later, and forwards upstream
-    frames back through the pipeline.
+    Collects downstream frames from parallel pipelines and routes
+    upstream frames back through the pipeline.
     """
 
     def __init__(self, downstream_queue: asyncio.Queue):
@@ -126,44 +100,29 @@ class SyncParallelPipelineSink(FrameProcessor):
 
 
 class SyncParallelPipeline(BasePipeline):
-    """Fans each input frame to parallel pipelines then holds output until every pipeline finishes.
+    """Pipeline that processes frames through multiple parallel pipelines synchronously.
 
-    For each inbound frame the pipeline:
+    Creates multiple parallel processing paths that all receive the same input frames
+    and produces synchronized output. Each parallel path is a separate pipeline that
+    processes frames independently, with synchronization points to ensure consistent
+    ordering and prevent duplicate frame processing.
 
-    1. Sends the frame into every parallel pipeline.
-    2. Sends a ``SyncFrame`` sentinel behind it in each pipeline.
-    3. Waits until every pipeline has produced its ``SyncFrame``, meaning all
-       output for that input is ready.
-    4. Releases the collected output frames (deduplicating by frame id, since
-       the same frame may emerge from more than one branch).
-
-    System frames (except ``EndFrame``) bypass this mechanism entirely — they are
-    forwarded through each pipeline and pushed immediately, since system frames
-    are expected to race ahead of regular data frames.
-
-    By default, output frames are pushed in the order they arrive from any pipeline
-    (``FrameOrder.ARRIVAL``). Set ``frame_order=FrameOrder.PIPELINE`` to push frames
-    in pipeline definition order instead — all output from the first pipeline, then
-    the second, and so on.
+    The pipeline uses SyncFrame control frames to coordinate between parallel paths
+    and ensure all paths have completed processing before moving to the next frame.
     """
 
-    def __init__(self, *args, frame_order: FrameOrder = FrameOrder.ARRIVAL):
+    def __init__(self, *args):
         """Initialize the synchronous parallel pipeline.
 
         Args:
-            *args: Variable number of processor lists, each representing a parallel
-                pipeline path. Each argument should be a list of FrameProcessor instances.
-            frame_order: Controls the order in which synchronized output frames are
-                pushed. ``FrameOrder.ARRIVAL`` (default) pushes frames in the order they arrive.
-                ``FrameOrder.PIPELINE`` pushes all frames from the first pipeline
-                before the second, and so on.
+            *args: Variable number of processor lists, each representing a parallel pipeline path.
+                   Each argument should be a list of FrameProcessor instances.
 
         Raises:
             Exception: If no arguments are provided.
             TypeError: If any argument is not a list of processors.
         """
         super().__init__()
-        self._frame_order = frame_order
 
         if len(args) == 0:
             raise Exception(f"SyncParallelPipeline needs at least one argument")
@@ -214,7 +173,7 @@ class SyncParallelPipeline(BasePipeline):
         return self._pipelines
 
     @property
-    def entry_processors(self) -> list["FrameProcessor"]:
+    def entry_processors(self) -> List["FrameProcessor"]:
         """Return the list of entry processors for this processor.
 
         Entry processors are the first processors in a compound processor
@@ -225,9 +184,9 @@ class SyncParallelPipeline(BasePipeline):
         Returns:
             The list of entry processors.
         """
-        return [s["processor"] for s in self._sources]
+        return self._sources
 
-    def processors_with_metrics(self) -> list[FrameProcessor]:
+    def processors_with_metrics(self) -> List[FrameProcessor]:
         """Collect processors that can generate metrics from all parallel pipelines.
 
         Returns:
@@ -250,11 +209,11 @@ class SyncParallelPipeline(BasePipeline):
         await asyncio.gather(*[p.cleanup() for p in self._pipelines])
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
-        """Send a frame through all parallel pipelines and release output once all finish.
+        """Process frames through all parallel pipelines with synchronization.
 
-        System frames (except EndFrame) skip synchronization and pass straight
-        through. All other frames are fanned out to every pipeline, and output is
-        held until every pipeline signals completion (via SyncFrame).
+        Distributes frames to all parallel pipelines and synchronizes their output
+        to maintain proper ordering and prevent duplicate processing. Uses SyncFrame
+        control frames to coordinate between parallel paths.
 
         Args:
             frame: The frame to process.
@@ -262,102 +221,60 @@ class SyncParallelPipeline(BasePipeline):
         """
         await super().process_frame(frame, direction)
 
-        # SystemFrames are simply passed through all internal pipelines without
-        # draining queued output. This avoids the race condition where a
-        # SystemFrame's wait_for_sync steals frames from a concurrent
-        # non-SystemFrame's wait_for_sync.
-        if isinstance(frame, SystemFrame):
-            if direction == FrameDirection.UPSTREAM:
-                for s in self._sinks:
-                    await s["processor"].process_frame(frame, direction)
-            elif direction == FrameDirection.DOWNSTREAM:
-                for s in self._sources:
-                    await s["processor"].process_frame(frame, direction)
-            await self.push_frame(frame, direction)
-            return
-
-        use_pipeline_order = self._frame_order == FrameOrder.PIPELINE
-
         # The last processor of each pipeline needs to be synchronous otherwise
-        # this element won't work. Since we know it should be synchronous we
+        # this element won't work. Since, we know it should be synchronous we
         # push a SyncFrame. Since frames are ordered we know this frame will be
         # pushed after the synchronous processor has pushed its data allowing us
-        # to synchronize all the internal pipelines by waiting for the
+        # to synchrnonize all the internal pipelines by waiting for the
         # SyncFrame in all of them.
-        #
-        # In ARRIVAL mode, output frames are put onto a shared main_queue as
-        # they arrive. In PIPELINE mode, they are accumulated in a per-pipeline
-        # list and returned so the caller can drain them in definition order.
         async def wait_for_sync(
             obj, main_queue: asyncio.Queue, frame: Frame, direction: FrameDirection
-        ) -> list[Frame]:
+        ):
             processor = obj["processor"]
             queue = obj["queue"]
-            output_frames: list[Frame] = []
 
             await processor.process_frame(frame, direction)
 
-            if isinstance(frame, EndFrame):
+            if isinstance(frame, (SystemFrame, EndFrame)):
                 new_frame = await queue.get()
-                if isinstance(new_frame, EndFrame):
-                    if use_pipeline_order:
-                        output_frames.append(new_frame)
-                    else:
-                        await main_queue.put(new_frame)
+                if isinstance(new_frame, (SystemFrame, EndFrame)):
+                    await main_queue.put(new_frame)
                 else:
-                    while not isinstance(new_frame, EndFrame):
-                        if use_pipeline_order:
-                            output_frames.append(new_frame)
-                        else:
-                            await main_queue.put(new_frame)
+                    while not isinstance(new_frame, (SystemFrame, EndFrame)):
+                        await main_queue.put(new_frame)
                         queue.task_done()
                         new_frame = await queue.get()
             else:
                 await processor.process_frame(SyncFrame(), direction)
                 new_frame = await queue.get()
                 while not isinstance(new_frame, SyncFrame):
-                    if use_pipeline_order:
-                        output_frames.append(new_frame)
-                    else:
-                        await main_queue.put(new_frame)
+                    await main_queue.put(new_frame)
                     queue.task_done()
                     new_frame = await queue.get()
 
-            return output_frames
-
         if direction == FrameDirection.UPSTREAM:
             # If we get an upstream frame we process it in each sink.
-            frames_per_pipeline = await asyncio.gather(
+            await asyncio.gather(
                 *[wait_for_sync(s, self._up_queue, frame, direction) for s in self._sinks]
             )
         elif direction == FrameDirection.DOWNSTREAM:
             # If we get a downstream frame we process it in each source.
-            frames_per_pipeline = await asyncio.gather(
+            await asyncio.gather(
                 *[wait_for_sync(s, self._down_queue, frame, direction) for s in self._sources]
             )
 
-        if use_pipeline_order:
-            # Push frames in pipeline definition order, deduplicating by id.
-            seen_ids = set()
-            for pipeline_frames in frames_per_pipeline:
-                for f in pipeline_frames:
-                    if f.id not in seen_ids:
-                        await self.push_frame(f, direction)
-                        seen_ids.add(f.id)
-        else:
-            # ARRIVAL mode: drain the shared queues in the order frames arrived.
-            seen_ids = set()
-            while not self._up_queue.empty():
-                frame = await self._up_queue.get()
-                if frame.id not in seen_ids:
-                    await self.push_frame(frame, FrameDirection.UPSTREAM)
-                    seen_ids.add(frame.id)
-                self._up_queue.task_done()
+        seen_ids = set()
+        while not self._up_queue.empty():
+            frame = await self._up_queue.get()
+            if frame.id not in seen_ids:
+                await self.push_frame(frame, FrameDirection.UPSTREAM)
+                seen_ids.add(frame.id)
+            self._up_queue.task_done()
 
-            seen_ids = set()
-            while not self._down_queue.empty():
-                frame = await self._down_queue.get()
-                if frame.id not in seen_ids:
-                    await self.push_frame(frame, FrameDirection.DOWNSTREAM)
-                    seen_ids.add(frame.id)
-                self._down_queue.task_done()
+        seen_ids = set()
+        while not self._down_queue.empty():
+            frame = await self._down_queue.get()
+            if frame.id not in seen_ids:
+                await self.push_frame(frame, FrameDirection.DOWNSTREAM)
+                seen_ids.add(frame.id)
+            self._down_queue.task_done()

@@ -29,7 +29,7 @@ async def test_openai_llm_emits_error_frame_on_timeout():
     primary LLM times out.
     """
     with patch.object(OpenAILLMService, "create_client"):
-        service = OpenAILLMService(settings=OpenAILLMService.Settings(model="gpt-4"))
+        service = OpenAILLMService(model="gpt-4")
         service._client = AsyncMock()
 
         # Track pushed frames and errors
@@ -96,7 +96,7 @@ async def test_openai_llm_timeout_still_pushes_end_frame():
     The finally block should ensure proper cleanup regardless of timeout.
     """
     with patch.object(OpenAILLMService, "create_client"):
-        service = OpenAILLMService(settings=OpenAILLMService.Settings(model="gpt-4"))
+        service = OpenAILLMService(model="gpt-4")
         service._client = AsyncMock()
 
         pushed_frames = []
@@ -137,7 +137,7 @@ async def test_openai_llm_stream_closed_on_cancellation():
     import asyncio
 
     with patch.object(OpenAILLMService, "create_client"):
-        service = OpenAILLMService(settings=OpenAILLMService.Settings(model="gpt-4"))
+        service = OpenAILLMService(model="gpt-4")
         service._client = AsyncMock()
 
         # Track if close was called
@@ -171,7 +171,8 @@ async def test_openai_llm_stream_closed_on_cancellation():
         mock_stream = MockAsyncStream()
 
         # Mock the stream creation methods
-        service.get_chat_completions = AsyncMock(return_value=mock_stream)
+        service._stream_chat_completions_specific_context = AsyncMock(return_value=mock_stream)
+        service._stream_chat_completions_universal_context = AsyncMock(return_value=mock_stream)
         service.start_ttfb_metrics = AsyncMock()
         service.stop_ttfb_metrics = AsyncMock()
         service.start_llm_usage_metrics = AsyncMock()
@@ -195,7 +196,7 @@ async def test_openai_llm_emits_error_frame_on_exception():
     This enables proper error handling for API errors, rate limits, and other failures.
     """
     with patch.object(OpenAILLMService, "create_client"):
-        service = OpenAILLMService(settings=OpenAILLMService.Settings(model="gpt-4"))
+        service = OpenAILLMService(model="gpt-4")
         service._client = AsyncMock()
 
         pushed_errors = []
@@ -233,7 +234,7 @@ async def test_openai_llm_async_iterator_closed_on_stream_end():
     See MagicStack/uvloop#699.
     """
     with patch.object(OpenAILLMService, "create_client"):
-        service = OpenAILLMService(settings=OpenAILLMService.Settings(model="gpt-4"))
+        service = OpenAILLMService(model="gpt-4")
         service._client = AsyncMock()
 
         # Track if the iterator's aclose was called
@@ -280,7 +281,8 @@ async def test_openai_llm_async_iterator_closed_on_stream_end():
         mock_iterator = MockAsyncIterator()
         mock_stream = MockAsyncStream(mock_iterator)
 
-        service.get_chat_completions = AsyncMock(return_value=mock_stream)
+        service._stream_chat_completions_specific_context = AsyncMock(return_value=mock_stream)
+        service._stream_chat_completions_universal_context = AsyncMock(return_value=mock_stream)
         service.start_ttfb_metrics = AsyncMock()
         service.stop_ttfb_metrics = AsyncMock()
         service.start_llm_usage_metrics = AsyncMock()

@@ -13,10 +13,6 @@ transcript is received.
 These values are used by turn stop strategies to optimize timing. Each STT
 service publishes its latency via STTMetadataFrame at pipeline start.
 
-All built-in values were measured with VADParams.stop_secs=0.2, the recommended
-default. If you change stop_secs, re-run the benchmark with your VAD settings
-and pass the measured value to your STT service constructor.
-
 To measure latency for your specific deployment (region, network conditions,
 self-hosted instances), use the STT benchmark tool:
 https://github.com/pipecat-ai/stt-benchmark
@@ -25,13 +21,6 @@ Run the TTFS benchmark for your service and configuration, then pass the
 measured value to your STT service constructor:
 
     stt = DeepgramSTTService(api_key="...", ttfs_p99_latency=0.45)
-
-Turn-based STT services (e.g. ``CartesiaTurnsSTTService``,
-``DeepgramFluxSTTService``) have no meaningful TTFS metric — the server
-defines the turn boundary directly, so there is no separate "speech end →
-final transcript" interval to measure. Those services override the
-``STTService.supports_ttfs`` property to return False rather than supplying
-a constant here.
 """
 
 # Conservative fallback for services without measured values
@@ -49,16 +38,15 @@ ELEVENLABS_REALTIME_TTFS_P99: float = 0.41
 FAL_TTFS_P99: float = 2.07
 GLADIA_TTFS_P99: float = 1.49
 GOOGLE_TTFS_P99: float = 1.57
-GRADIUM_TTFS_P99: float = 0.60
+GRADIUM_TTFS_P99: float = 1.61
 GROQ_TTFS_P99: float = 1.54
-MISTRAL_TTFS_P99: float = 1.89
+HATHORA_TTFS_P99: float = 0.87
 OPENAI_TTFS_P99: float = 2.01
 OPENAI_REALTIME_TTFS_P99: float = 1.66
+SAMBANOVA_TTFS_P99: float = 2.20
 SARVAM_TTFS_P99: float = 1.17
-SMALLEST_TTFS_P99: float = 1.59
 SONIOX_TTFS_P99: float = 0.35
 SPEECHMATICS_TTFS_P99: float = 0.74
-XAI_TTFS_P99: float = 2.14
 
 # These services run locally and should be replaced with measured values
 NVIDIA_TTFS_P99: float = DEFAULT_TTFS_P99

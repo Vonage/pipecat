@@ -11,6 +11,8 @@ custom gate open/close functions, allowing for conditional frame buffering
 and release in frame processing pipelines.
 """
 
+from typing import List, Tuple
+
 from loguru import logger
 
 from pipecat.frames.frames import Frame, SystemFrame
@@ -46,7 +48,7 @@ class GatedAggregator(FrameProcessor):
         self._gate_close_fn = gate_close_fn
         self._gate_open = start_open
         self._direction = direction
-        self._accumulator: list[tuple[Frame, FrameDirection]] = []
+        self._accumulator: List[Tuple[Frame, FrameDirection]] = []
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         """Process incoming frames with gated accumulation logic.

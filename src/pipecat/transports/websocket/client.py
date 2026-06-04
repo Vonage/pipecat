@@ -15,7 +15,7 @@ import asyncio
 import io
 import time
 import wave
-from collections.abc import Awaitable, Callable
+from typing import Awaitable, Callable, Optional
 
 import websockets
 from loguru import logger
@@ -51,8 +51,8 @@ class WebsocketClientParams(TransportParams):
     """
 
     add_wav_header: bool = True
-    additional_headers: dict[str, str] | None = None
-    serializer: FrameSerializer | None = None
+    additional_headers: Optional[dict[str, str]] = None
+    serializer: Optional[FrameSerializer] = None
 
 
 class WebsocketClientCallbacks(BaseModel):
@@ -64,18 +64,9 @@ class WebsocketClientCallbacks(BaseModel):
         on_message: Called when a message is received from the WebSocket.
     """
 
-    on_connected: Callable[
-        [websockets.WebSocketClientProtocol],  # pyright: ignore[reportAttributeAccessIssue]
-        Awaitable[None],
-    ]
-    on_disconnected: Callable[
-        [websockets.WebSocketClientProtocol],  # pyright: ignore[reportAttributeAccessIssue]
-        Awaitable[None],
-    ]
-    on_message: Callable[
-        [websockets.WebSocketClientProtocol, websockets.Data],  # pyright: ignore[reportAttributeAccessIssue]
-        Awaitable[None],
-    ]
+    on_connected: Callable[[websockets.WebSocketClientProtocol], Awaitable[None]]
+    on_disconnected: Callable[[websockets.WebSocketClientProtocol], Awaitable[None]]
+    on_message: Callable[[websockets.WebSocketClientProtocol, websockets.Data], Awaitable[None]]
 
 
 class WebsocketClientSession:
@@ -106,8 +97,8 @@ class WebsocketClientSession:
         self._transport_name = transport_name
 
         self._leave_counter = 0
-        self._task_manager: BaseTaskManager | None = None
-        self._websocket: websockets.WebSocketClientProtocol | None = None  # pyright: ignore[reportAttributeAccessIssue]
+        self._task_manager: Optional[BaseTaskManager] = None
+        self._websocket: Optional[websockets.WebSocketClientProtocol] = None
 
     @property
     def task_manager(self) -> BaseTaskManager:
@@ -201,10 +192,6 @@ class WebsocketClientSession:
 
     async def _client_task_handler(self):
         """Handle incoming messages from the WebSocket connection."""
-        # `connect()` only starts this task after `_websocket` is assigned, and
-        # `disconnect()` cancels the task before clearing `_websocket`, so this
-        # invariant should always hold when this method runs.
-        assert self._websocket is not None
         try:
             # Handle incoming messages
             async for message in self._websocket:
@@ -500,7 +487,7 @@ class WebsocketClientTransport(BaseTransport):
     def __init__(
         self,
         uri: str,
-        params: WebsocketClientParams | None = None,
+        params: Optional[WebsocketClientParams] = None,
     ):
         """Initialize the WebSocket client transport.
 
@@ -520,8 +507,8 @@ class WebsocketClientTransport(BaseTransport):
         )
 
         self._session = WebsocketClientSession(uri, self._params, callbacks, self.name)
-        self._input: WebsocketClientInputTransport | None = None
-        self._output: WebsocketClientOutputTransport | None = None
+        self._input: Optional[WebsocketClientInputTransport] = None
+        self._output: Optional[WebsocketClientOutputTransport] = None
 
         # Register supported handlers. The user will only be able to register
         # these handlers.

@@ -7,11 +7,9 @@
 """Pipeline-scoped tracing context for OpenTelemetry tracing in Pipecat.
 
 This module provides a per-pipeline tracing context that holds the current
-conversation and turn span contexts. Each PipelineWorker creates its own
+conversation and turn span contexts. Each PipelineTask creates its own
 TracingContext, ensuring concurrent pipelines do not interfere with each other.
 """
-
-from __future__ import annotations
 
 import uuid
 from typing import TYPE_CHECKING, Optional
@@ -31,18 +29,18 @@ class TracingContext:
     """Pipeline-scoped tracing context.
 
     Holds the current conversation and turn span contexts for a single pipeline.
-    Created by PipelineWorker, passed to TurnTraceObserver (writer) and services
+    Created by PipelineTask, passed to TurnTraceObserver (writer) and services
     (readers) via StartFrame.
     """
 
     def __init__(self):
         """Initialize the tracing context with empty state."""
-        self._conversation_context: Context | None = None
-        self._turn_context: Context | None = None
-        self._conversation_id: str | None = None
+        self._conversation_context: Optional["Context"] = None
+        self._turn_context: Optional["Context"] = None
+        self._conversation_id: Optional[str] = None
 
     def set_conversation_context(
-        self, span_context: SpanContext | None, conversation_id: str | None = None
+        self, span_context: Optional["SpanContext"], conversation_id: Optional[str] = None
     ):
         """Set the current conversation context.
 
@@ -61,7 +59,7 @@ class TracingContext:
         else:
             self._conversation_context = None
 
-    def get_conversation_context(self) -> Context | None:
+    def get_conversation_context(self) -> Optional["Context"]:
         """Get the OpenTelemetry context for the current conversation.
 
         Returns:
@@ -69,7 +67,7 @@ class TracingContext:
         """
         return self._conversation_context
 
-    def set_turn_context(self, span_context: SpanContext | None):
+    def set_turn_context(self, span_context: Optional["SpanContext"]):
         """Set the current turn context.
 
         Args:
@@ -84,7 +82,7 @@ class TracingContext:
         else:
             self._turn_context = None
 
-    def get_turn_context(self) -> Context | None:
+    def get_turn_context(self) -> Optional["Context"]:
         """Get the OpenTelemetry context for the current turn.
 
         Returns:
@@ -93,7 +91,7 @@ class TracingContext:
         return self._turn_context
 
     @property
-    def conversation_id(self) -> str | None:
+    def conversation_id(self) -> Optional[str]:
         """Get the ID for the current conversation.
 
         Returns:

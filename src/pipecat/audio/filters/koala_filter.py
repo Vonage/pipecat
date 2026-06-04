@@ -10,7 +10,7 @@ This module provides an audio filter implementation using PicoVoice's Koala
 Noise Suppression engine to reduce background noise in audio streams.
 """
 
-from collections.abc import Sequence
+from typing import Sequence
 
 import numpy as np
 from loguru import logger
@@ -23,7 +23,7 @@ try:
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
     logger.error("In order to use the Koala filter, you need to `pip install pipecat-ai[koala]`.")
-    raise ImportError(f"Missing module: {e}") from e
+    raise Exception(f"Missing module: {e}")
 
 
 class KoalaFilter(BaseAudioFilter):

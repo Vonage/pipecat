@@ -1,16 +1,8 @@
 #!/bin/bash
 
-# Usage: ./build-docs.sh [--strict]
-#   --strict: Treat warnings as errors (default: warnings only)
-
-SPHINX_OPTS=""
-if [ "$1" = "--strict" ]; then
-    SPHINX_OPTS="-W --keep-going"
-fi
-
 # Build docs using uv
 echo "Installing dependencies with uv..."
-uv sync --group docs --all-extras --no-extra gstreamer --no-extra local_smart_turn --no-extra moondream --no-extra mlx-whisper
+uv sync --group docs --all-extras --no-extra krisp --no-extra gstreamer --no-extra local_smart_turn --no-extra moondream --no-extra riva --no-extra mlx-whisper
 
 # Check if sphinx-build is available
 if ! uv run sphinx-build --version &> /dev/null; then
@@ -22,7 +14,8 @@ fi
 rm -rf _build
 
 echo "Building documentation..."
-uv run sphinx-build -b html -d _build/doctrees . _build/html $SPHINX_OPTS
+# Build docs matching ReadTheDocs configuration
+uv run sphinx-build -b html -d _build/doctrees . _build/html -W --keep-going
 
 if [ $? -eq 0 ]; then
     echo "Documentation built successfully!"

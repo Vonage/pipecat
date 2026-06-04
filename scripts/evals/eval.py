@@ -13,9 +13,10 @@ import wave
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, List, Optional, Tuple
 
 import aiofiles
+from deepgram import LiveOptions
 from loguru import logger
 from PIL.ImageFile import ImageFile
 from utils import (
@@ -39,7 +40,7 @@ from pipecat.frames.frames import (
 )
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.worker import PipelineParams, PipelineWorker
+from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
@@ -60,7 +61,7 @@ PIPELINE_IDLE_TIMEOUT_SECS = 60
 EVAL_TIMEOUT_SECS = 120
 EVAL_RESULT_TIMEOUT_SECS = 10
 
-EvalPrompt = str | tuple[str, ImageFile]
+EvalPrompt = str | Tuple[str, ImageFile]
 
 
 @dataclass
@@ -68,7 +69,7 @@ class EvalConfig:
     prompt: EvalPrompt
     eval: str
     eval_speaks_first: bool = False
-    runner_args_body: Any | None = None
+    runner_args_body: Optional[Any] = None
 
 
 class EvalRunner:
@@ -78,7 +79,7 @@ class EvalRunner:
         examples_dir: Path,
         pattern: str = "",
         record_audio: bool = False,
-        name: str | None = None,
+        name: Optional[str] = None,
         log_level: str = "DEBUG",
     ):
         self._examples_dir = examples_dir
@@ -86,8 +87,8 @@ class EvalRunner:
         self._record_audio = record_audio
         self._log_level = log_level
         self._total_success = 0
-        self._tests: list[EvalResult] = []
-        self._result_future: asyncio.Future[bool] | None = None
+        self._tests: List[EvalResult] = []
+        self._result_future: Optional[asyncio.Future[bool]] = None
 
         # We to save runner files.
         name = name or f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -150,7 +151,7 @@ class EvalRunner:
         try:
             # Wait for the future to resolve.
             result = await asyncio.wait_for(self._result_future, timeout=EVAL_RESULT_TIMEOUT_SECS)
-        except TimeoutError:
+        except asyncio.TimeoutError:
             logger.error(f"ERROR: Timeout waiting for eval result.")
             result = False
 
@@ -171,7 +172,6 @@ class EvalRunner:
     async def save_audio(self, name: str, audio: bytes, sample_rate: int, num_channels: int):
         if len(audio) > 0:
             filename = self._recording_file_name(name)
-            os.makedirs(os.path.dirname(filename), exist_ok=True)
             logger.debug(f"Saving {name} audio to {filename}")
             with io.BytesIO() as buffer:
                 with wave.open(buffer, "wb") as wf:
@@ -198,7 +198,7 @@ class EvalRunner:
 
 
 async def run_example_pipeline(script_path: Path, eval_config: EvalConfig):
-    room_url = os.environ["DAILY_ROOM_URL"]
+    room_url = os.getenv("DAILY_ROOM_URL")
 
     module = load_module_from_path(script_path)
 
@@ -227,7 +227,7 @@ async def run_eval_pipeline(
 ):
     logger.info(f"Starting eval bot")
 
-    room_url = os.environ["DAILY_ROOM_URL"]
+    room_url = os.getenv("DAILY_ROOM_URL")
 
     transport = DailyTransport(
         room_url,
@@ -243,19 +243,21 @@ async def run_eval_pipeline(
     # We disable smart formatting because some times if the user says "3 + 2 is
     # 5" (in audio) this can be converted to "32 is 5".
     stt = DeepgramSTTService(
-        api_key=os.environ["DEEPGRAM_API_KEY"],
-        settings=DeepgramSTTService.Settings(
+        api_key=os.getenv("DEEPGRAM_API_KEY"),
+        live_options=LiveOptions(
             language="multi",
             smart_format=False,
         ),
     )
 
     tts = CartesiaTTSService(
-        api_key=os.environ["CARTESIA_API_KEY"],
-        settings=CartesiaTTSService.Settings(
-            voice="97f4b8fb-f2fe-444b-bb9a-c109783a857a",  # Nathan
-        ),
+        api_key=os.getenv("CARTESIA_API_KEY"),
+        voice_id="97f4b8fb-f2fe-444b-bb9a-c109783a857a",  # Nathan
     )
+
+    llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"))
+
+    llm.register_function("eval_function", eval_runner.function_assert_eval)
 
     eval_function = FunctionSchema(
         name="eval_function",
@@ -282,7 +284,7 @@ async def run_eval_pipeline(
 
     # Load example prompt depending on image.
     example_prompt = ""
-    example_image: ImageFile | None = None
+    example_image: Optional[ImageFile] = None
     if isinstance(eval_config.prompt, str):
         example_prompt = eval_config.prompt
     elif isinstance(eval_config.prompt, tuple):
@@ -300,16 +302,14 @@ async def run_eval_pipeline(
     else:
         system_prompt = f"You are an evaluation agent, be extremly brief. First, ask one question: {example_prompt}. {common_system_prompt}"
 
-    llm = OpenAILLMService(
-        api_key=os.getenv("OPENAI_API_KEY"),
-        settings=OpenAILLMService.Settings(
-            system_instruction=system_prompt,
-        ),
-    )
+    messages = [
+        {
+            "role": "system",
+            "content": system_prompt,
+        },
+    ]
 
-    llm.register_function("eval_function", eval_runner.function_assert_eval)
-
-    context = LLMContext(tools=tools)
+    context = LLMContext(messages, tools)
     context_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
@@ -332,7 +332,7 @@ async def run_eval_pipeline(
         ]
     )
 
-    worker = PipelineWorker(
+    task = PipelineTask(
         pipeline,
         params=PipelineParams(
             audio_in_sample_rate=16000,
@@ -350,7 +350,7 @@ async def run_eval_pipeline(
     async def on_client_connected(transport, client):
         logger.info(f"Client connected")
         if example_image:
-            await worker.queue_frame(
+            await task.queue_frame(
                 OutputImageRawFrame(
                     image=example_image.tobytes(),
                     size=example_image.size,
@@ -362,20 +362,20 @@ async def run_eval_pipeline(
         # Default behavior is for the bot to speak first
         # If the eval bot speaks first, we append the prompt to the messages
         if eval_config.eval_speaks_first:
-            context.add_message(
+            messages.append(
                 {"role": "user", "content": f"Start by saying this exactly: '{eval_config.prompt}'"}
             )
-            await worker.queue_frames([LLMRunFrame()])
+            await task.queue_frames([LLMRunFrame()])
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
         logger.info(f"Client disconnected")
-        await runner.cancel()
+        await task.cancel()
 
-    @worker.event_handler("on_pipeline_finished")
-    async def on_pipeline_finished(worker, frame):
+    @task.event_handler("on_pipeline_finished")
+    async def on_pipeline_finished(task, frame):
         if isinstance(frame, EndFrame):
-            await eval_runner.assert_eval(bool(frame.reason))
+            await eval_runner.assert_eval(frame.reason)
         elif isinstance(frame, CancelFrame):
             await eval_runner.assert_eval(False)
 
@@ -383,5 +383,4 @@ async def run_eval_pipeline(
     # eval and the example.
     runner = PipelineRunner(handle_sigint=False)
 
-    await runner.add_workers(worker)
-    await runner.run()
+    await runner.run(task)

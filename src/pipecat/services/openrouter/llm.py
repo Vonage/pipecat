@@ -10,22 +10,11 @@ This module provides an OpenAI-compatible interface for interacting with OpenRou
 extending the base OpenAI LLM service functionality.
 """
 
-from dataclasses import dataclass
-from typing import Any
+from typing import Any, Dict, Optional
 
 from loguru import logger
 
-from pipecat.adapters.services.open_ai_adapter import OpenAILLMInvocationParams
-from pipecat.services.openai.base_llm import BaseOpenAILLMService
 from pipecat.services.openai.llm import OpenAILLMService
-from pipecat.services.settings import assert_given
-
-
-@dataclass
-class OpenRouterLLMSettings(BaseOpenAILLMService.Settings):
-    """Settings for OpenRouterLLMService."""
-
-    pass
 
 
 class OpenRouterLLMService(OpenAILLMService):
@@ -35,17 +24,12 @@ class OpenRouterLLMService(OpenAILLMService):
     maintaining full compatibility with OpenAI's interface and functionality.
     """
 
-    Settings = OpenRouterLLMSettings
-    _settings: Settings
-    supports_developer_role = False
-
     def __init__(
         self,
         *,
-        api_key: str | None = None,
-        model: str | None = None,
+        api_key: Optional[str] = None,
+        model: str = "openai/gpt-4o-2024-11-20",
         base_url: str = "https://openrouter.ai/api/v1",
-        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize the OpenRouter LLM service.
@@ -53,34 +37,14 @@ class OpenRouterLLMService(OpenAILLMService):
         Args:
             api_key: The API key for accessing OpenRouter's API. If None, will attempt
                 to read from environment variables.
-            model: The model identifier to use. Defaults to "openai/gpt-4.1".
-
-                .. deprecated:: 0.0.105
-                    Use ``settings=OpenRouterLLMService.Settings(model=...)`` instead.
-
+            model: The model identifier to use. Defaults to "openai/gpt-4o-2024-11-20".
             base_url: The base URL for OpenRouter API. Defaults to "https://openrouter.ai/api/v1".
-            settings: Runtime-updatable settings. When provided alongside deprecated
-                parameters, ``settings`` values take precedence.
             **kwargs: Additional keyword arguments passed to OpenAILLMService.
         """
-        # 1. Initialize default_settings with hardcoded defaults
-        default_settings = self.Settings(model="openai/gpt-4.1")
-
-        # 2. Apply direct init arg overrides (deprecated)
-        if model is not None:
-            self._warn_init_param_moved_to_settings("model", "model")
-            default_settings.model = model
-
-        # 3. (No step 3, as there's no params object to apply)
-
-        # 4. Apply settings delta (canonical API, always wins)
-        if settings is not None:
-            default_settings.apply_update(settings)
-
         super().__init__(
             api_key=api_key,
             base_url=base_url,
-            settings=default_settings,
+            model=model,
             **kwargs,
         )
 
@@ -98,9 +62,7 @@ class OpenRouterLLMService(OpenAILLMService):
         logger.debug(f"Creating OpenRouter client with api {base_url}")
         return super().create_client(api_key, base_url, **kwargs)
 
-    def build_chat_completion_params(
-        self, params_from_context: OpenAILLMInvocationParams
-    ) -> dict[str, Any]:
+    def build_chat_completion_params(self, params_from_context: Dict[str, Any]) -> Dict[str, Any]:
         """Builds chat parameters, handling model-specific constraints.
 
         Args:
@@ -110,8 +72,7 @@ class OpenRouterLLMService(OpenAILLMService):
             Transformed parameters ready for the API call.
         """
         params = super().build_chat_completion_params(params_from_context)
-        model = assert_given(self._settings.model)
-        if model is not None and "gemini" in model.lower():
+        if "gemini" in self._settings.model.lower():
             messages = params.get("messages", [])
             if not messages:
                 return params

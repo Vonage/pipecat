@@ -33,8 +33,8 @@ class StandardSessionResponse(BaseModel):
     access_token: str
     livekit_agent_token: str
 
-    livekit_url: str
-    ws_url: str
+    livekit_url: str = None
+    ws_url: str = None
 
     raw_response: Any
 

@@ -5,6 +5,7 @@
 #
 
 import unittest
+from typing import List
 
 from pipecat.audio.vad.vad_analyzer import VADAnalyzer, VADState
 from pipecat.frames.frames import (
@@ -21,7 +22,7 @@ from pipecat.tests.utils import run_test
 class MockVADAnalyzer(VADAnalyzer):
     """A mock VAD analyzer that returns states from a predefined sequence."""
 
-    def __init__(self, states: list[VADState]):
+    def __init__(self, states: List[VADState]):
         super().__init__(sample_rate=16000)
         self._states = list(states)
         self._call_index = 0

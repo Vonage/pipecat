@@ -11,8 +11,7 @@ while preserving structure and handling special cases like code blocks and table
 """
 
 import re
-from collections.abc import Mapping
-from typing import Any
+from typing import Any, Mapping, Optional
 
 from markdown import Markdown
 from pydantic import BaseModel
@@ -38,11 +37,11 @@ class MarkdownTextFilter(BaseTextFilter):
             filter_tables: Whether to remove table content from the text. Defaults to False.
         """
 
-        enable_text_filter: bool | None = True
-        filter_code: bool | None = False
-        filter_tables: bool | None = False
+        enable_text_filter: Optional[bool] = True
+        filter_code: Optional[bool] = False
+        filter_tables: Optional[bool] = False
 
-    def __init__(self, params: InputParams | None = None, **kwargs):
+    def __init__(self, params: Optional[InputParams] = None, **kwargs):
         """Initialize the Markdown text filter.
 
         Args:

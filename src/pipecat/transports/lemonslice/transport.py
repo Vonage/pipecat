@@ -10,14 +10,13 @@ This module adds LemonSlice avatars to Daily rooms, enabling
 real-time voice conversations with synchronized avatars.
 """
 
-from collections.abc import Awaitable, Callable, Mapping
 from functools import partial
-from typing import Any
+from typing import Any, Awaitable, Callable, Mapping, Optional
 
 import aiohttp
 from daily.daily import AudioData
 from loguru import logger
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
@@ -55,20 +54,16 @@ class LemonSliceNewSessionRequest(BaseModel):
         idle_timeout: Idle timeout in seconds.
         daily_room_url: Daily room URL to use for the session.
         daily_token: Daily token for authenticating with the room.
-        lemonslice_properties: Additional connection properties to pass to the session.
-        api_url: Override the LemonSlice API URL.
+        lemonslice_properties: Additional properties to pass to the session.
     """
 
-    model_config = ConfigDict(extra="allow")
-
-    agent_image_url: str | None = None
-    agent_id: str | None = None
-    agent_prompt: str | None = None
-    idle_timeout: int | None = None
-    daily_room_url: str | None = None
-    daily_token: str | None = None
-    lemonslice_properties: dict | None = None
-    api_url: str | None = None
+    agent_image_url: Optional[str] = None
+    agent_id: Optional[str] = None
+    agent_prompt: Optional[str] = None
+    idle_timeout: Optional[int] = None
+    daily_room_url: Optional[str] = None
+    daily_token: Optional[str] = None
+    lemonslice_properties: Optional[dict] = None
 
 
 class LemonSliceCallbacks(BaseModel):
@@ -115,7 +110,7 @@ class LemonSliceTransportClient:
         params: LemonSliceParams = LemonSliceParams(),
         callbacks: LemonSliceCallbacks,
         api_key: str,
-        session_request: LemonSliceNewSessionRequest | None = None,
+        session_request: Optional[LemonSliceNewSessionRequest] = None,
         session: aiohttp.ClientSession,
     ) -> None:
         """Initialize the LemonSlice transport client.
@@ -132,16 +127,14 @@ class LemonSliceTransportClient:
         self._bot_name = bot_name
         self._api = LemonSliceApi(api_key, session)
         self._session_request = session_request or LemonSliceNewSessionRequest()
-        self._session_id: str | None = None
-        self._control_url: str | None = None
-        self._daily_transport_client: DailyTransportClient | None = None
+        self._session_id: Optional[str] = None
+        self._control_url: Optional[str] = None
+        self._daily_transport_client: Optional[DailyTransportClient] = None
         self._callbacks = callbacks
         self._params = params
 
     async def _initialize(self) -> str:
         """Initialize the conversation and return the room URL."""
-        connection_properties = dict(self._session_request.lemonslice_properties or {})
-        extra_properties = self._session_request.model_extra
         response = await self._api.create_session(
             agent_image_url=self._session_request.agent_image_url,
             agent_id=self._session_request.agent_id,
@@ -149,9 +142,7 @@ class LemonSliceTransportClient:
             idle_timeout=self._session_request.idle_timeout,
             daily_room_url=self._session_request.daily_room_url,
             daily_token=self._session_request.daily_token,
-            connection_properties=connection_properties if connection_properties else None,
-            extra_properties=extra_properties if extra_properties else None,
-            api_url=self._session_request.api_url,
+            properties=self._session_request.lemonslice_properties,
         )
         self._session_id = response["session_id"]
         self._control_url = response["control_url"]
@@ -190,7 +181,6 @@ class LemonSliceTransportClient:
                 on_dialout_stopped=partial(self._on_handle_callback, "on_dialout_stopped"),
                 on_dialout_error=partial(self._on_handle_callback, "on_dialout_error"),
                 on_dialout_warning=partial(self._on_handle_callback, "on_dialout_warning"),
-                on_dtmf_event=partial(self._on_handle_callback, "on_dtmf_event"),
                 on_participant_joined=self._callbacks.on_participant_joined,
                 on_participant_left=self._callbacks.on_participant_left,
                 on_participant_updated=partial(self._on_handle_callback, "on_participant_updated"),
@@ -312,9 +302,6 @@ class LemonSliceTransportClient:
         Args:
             frame: The message frame to send.
         """
-        if self._daily_transport_client is None:
-            return
-
         await self._daily_transport_client.send_message(frame)
 
     @property
@@ -544,7 +531,7 @@ class LemonSliceOutputTransport(BaseOutputTransport):
         # Whether we have seen a StartFrame already.
         self._initialized = False
         # This is the custom track destination expected by LemonSlice
-        self._transport_destination: str | None = "stream"
+        self._transport_destination: Optional[str] = "stream"
 
     async def setup(self, setup: FrameProcessorSetup):
         """Setup the output transport.
@@ -681,8 +668,6 @@ class LemonSliceTransport(BaseTransport):
 
     - on_client_connected(transport, participant): Participant connected to the session
     - on_client_disconnected(transport, participant): Participant disconnected from the session
-    - on_avatar_connected(transport, participant): LemonSlice avatar connected to the session
-    - on_avatar_disconnected(transport, participant, reason): LemonSlice avatar disconnected from the session
 
     Example::
 
@@ -696,10 +681,10 @@ class LemonSliceTransport(BaseTransport):
         bot_name: str,
         session: aiohttp.ClientSession,
         api_key: str,
-        session_request: LemonSliceNewSessionRequest | None = None,
+        session_request: Optional[LemonSliceNewSessionRequest] = None,
         params: LemonSliceParams = LemonSliceParams(),
-        input_name: str | None = None,
-        output_name: str | None = None,
+        input_name: Optional[str] = None,
+        output_name: Optional[str] = None,
     ):
         """Initialize the LemonSlice transport.
 
@@ -728,23 +713,19 @@ class LemonSliceTransport(BaseTransport):
             session=session,
             params=params,
         )
-        self._input: LemonSliceInputTransport | None = None
-        self._output: LemonSliceOutputTransport | None = None
+        self._input: Optional[LemonSliceInputTransport] = None
+        self._output: Optional[LemonSliceOutputTransport] = None
         self._lemonslice_participant_id = None
 
         # Register supported handlers. The user will only be able to register
         # these handlers.
         self._register_event_handler("on_client_connected")
         self._register_event_handler("on_client_disconnected")
-        self._register_event_handler("on_avatar_connected")
-        self._register_event_handler("on_avatar_disconnected")
 
     async def _on_participant_left(self, participant, reason):
         """Handle participant left events."""
         ls_bot_name = await self._client.get_bot_name()
-        if participant.get("info", {}).get("userName", "") == ls_bot_name:
-            await self._on_avatar_disconnected(participant, reason)
-        else:
+        if participant.get("info", {}).get("userName", "") != ls_bot_name:
             await self._on_client_disconnected(participant)
 
     async def _on_participant_joined(self, participant):
@@ -754,7 +735,6 @@ class LemonSliceTransport(BaseTransport):
         # Ignore the LemonSlice bot's microphone
         if participant.get("info", {}).get("userName", "") == ls_bot_name:
             self._lemonslice_participant_id = participant["id"]
-            await self._on_avatar_connected(participant)
         else:
             await self._on_client_connected(participant)
             if self._lemonslice_participant_id:
@@ -800,14 +780,6 @@ class LemonSliceTransport(BaseTransport):
         if not self._output:
             self._output = LemonSliceOutputTransport(client=self._client, params=self._params)
         return self._output
-
-    async def _on_avatar_connected(self, participant: Any):
-        """Handle avatar connected events."""
-        await self._call_event_handler("on_avatar_connected", participant)
-
-    async def _on_avatar_disconnected(self, participant: Any, reason: str):
-        """Handle avatar disconnected events."""
-        await self._call_event_handler("on_avatar_disconnected", participant, reason)
 
     async def _on_client_connected(self, participant: Any):
         """Handle client connected events."""

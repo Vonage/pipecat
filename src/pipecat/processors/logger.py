@@ -6,6 +6,8 @@
 
 """Frame logging utilities for debugging and monitoring frame flow in Pipecat pipelines."""
 
+from typing import Optional, Tuple, Type
+
 from loguru import logger
 
 from pipecat.frames.frames import (
@@ -31,8 +33,8 @@ class FrameLogger(FrameProcessor):
     def __init__(
         self,
         prefix="Frame",
-        color: str | None = None,
-        ignored_frame_types: tuple[type[Frame], ...] = (
+        color: Optional[str] = None,
+        ignored_frame_types: Tuple[Type[Frame], ...] = (
             BotSpeakingFrame,
             UserSpeakingFrame,
             InputAudioRawFrame,
