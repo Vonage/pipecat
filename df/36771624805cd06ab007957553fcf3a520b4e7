@@ -1,0 +1,31 @@
+src/pipecat/transports/vonage/client.py
+  s_6cc13cbcc7f081::t_7676bdded625d3 20
+  s_14d05559f5d580::t_bc03620136ec2c 92,97,119,156,268-269,797,804,821,1029-1031,1039,1098,1102,1115-1120
+  s_6cc13cbcc7f081::t_99f3674b046668 113,117-118
+  s_14d05559f5d580::t_f267786ad92684 126
+  s_6cc13cbcc7f081::t_fc9dbfa8a19b69 894-895
+  s_14d05559f5d580::t_5c37c53ac261ff 1060
+  s_14d05559f5d580::t_8857ee345b6343 48,1099-1101
+  s_14d05559f5d580::t_a37a3353ec8e93 25,29,42,168-170,1103-1114
+src/pipecat/transports/vonage/video_connector.py
+  s_e5034029d8dd04::t_e422c08c853c91 31-33
+  s_14d05559f5d580::t_bc03620136ec2c 85-89,94,134
+  s_14d05559f5d580::t_63724c2e5418a9 133
+  s_14d05559f5d580::t_a37a3353ec8e93 17,23,130-132
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "df36771624805cd06ab007957553fcf3a520b4e7",
+  "prompts": {},
+  "sessions": {
+    "s_14d05559f5d580": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_17af0b41fffeKro7Hpytf5mLd3",
+        "model": "claude-opus-4.6"
+      },
+      "human_author": "asilvestre <antoni.silvestrepadros@vonage.com>"
+    }
+  }
+}

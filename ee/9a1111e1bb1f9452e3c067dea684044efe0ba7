@@ -1,0 +1,26 @@
+src/pipecat/transports/vonage/client.py
+  s_6cc13cbcc7f081::t_7676bdded625d3 20
+  s_14d05559f5d580::t_bc03620136ec2c 94,99,121,157,274-275,795,802,820,1028-1030,1038,1133,1137,1150-1155,1072-1073,1081,1085,1090,1092-1093,1095
+  s_6cc13cbcc7f081::t_99f3674b046668 115,119-120
+  s_14d05559f5d580::t_f267786ad92684 128
+  s_6cc13cbcc7f081::t_fc9dbfa8a19b69 893-894
+  s_14d05559f5d580::t_5c37c53ac261ff 1061,22,31,152,158-159,170-172,293,295-297,819,1053-1054,1062-1071,1074-1080,1082-1084,1086-1089,1091,1094,1157-1162,1172
+  s_14d05559f5d580::t_8857ee345b6343 50,1134-1136
+  s_14d05559f5d580::t_a37a3353ec8e93 26,30,44,174-176,1138-1149
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "ee9a1111e1bb1f9452e3c067dea684044efe0ba7",
+  "prompts": {},
+  "sessions": {
+    "s_14d05559f5d580": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_17af0b41fffeKro7Hpytf5mLd3",
+        "model": "claude-opus-4.6"
+      },
+      "human_author": "asilvestre <antoni.silvestrepadros@vonage.com>"
+    }
+  }
+}
