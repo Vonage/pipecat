@@ -30,29 +30,32 @@ jobs:
 
       - name: Resolve version
         id: get_version
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Get the latest semver tag reachable from HEAD, excluding .postN tags
-          BASE_TAG=$(git tag --list 'v[0-9]*' --merged HEAD --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
-          if [ -z "$BASE_TAG" ]; then
-            echo "ERROR: No semver base tag found in history"
+          # Get the latest tag reachable from HEAD (includes .postN tags)
+          LATEST_TAG=$(git tag --list 'v[0-9]*' --merged HEAD --sort=-v:refname | head -1)
+          if [ -z "$LATEST_TAG" ]; then
+            echo "ERROR: No version tag found in history"
+            exit 1
+          fi
+
+          # Check if the latest tag already has a .postN suffix
+          if [[ "$LATEST_TAG" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+)\.post([0-9]+)$ ]]; then
+            BASE_TAG="${BASH_REMATCH[1]}"
+            SUFFIX=$(( ${BASH_REMATCH[2]} + 1 ))
+          elif [[ "$LATEST_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            BASE_TAG="$LATEST_TAG"
+            SUFFIX=1
+          else
+            echo "ERROR: Latest tag '$LATEST_TAG' does not match expected format"
             exit 1
           fi
 
           BASE_VERSION="${BASE_TAG#v}"
-
-          # Find the next available .postN suffix
-          SUFFIX=1
-          while gh release view "${BASE_TAG}.post${SUFFIX}" &>/dev/null; do
-            SUFFIX=$((SUFFIX + 1))
-          done
-
           TAG="${BASE_TAG}.post${SUFFIX}"
           VERSION="${BASE_VERSION}.post${SUFFIX}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Resolved version: $VERSION (tag: $TAG, base: $BASE_TAG)"
+          echo "Resolved version: $VERSION (tag: $TAG, base: $BASE_TAG, latest: $LATEST_TAG)"
       
       - name: Install uv
         uses: astral-sh/setup-uv@v3
