@@ -33,15 +33,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Get latest release tag, fall back to git describe on first run
-          LATEST_TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null)
-          if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
-            LATEST_TAG=$(git describe --tags --abbrev=0)
+          # Get the latest semver tag reachable from HEAD, excluding .postN tags
+          BASE_TAG=$(git tag --list 'v[0-9]*' --merged HEAD --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          if [ -z "$BASE_TAG" ]; then
+            echo "ERROR: No semver base tag found in history"
+            exit 1
           fi
 
-          # Extract base version (strip leading v and any .postN suffix)
-          BASE_VERSION=$(echo "${LATEST_TAG#v}" | sed -E 's/\.post[0-9]+$//')
-          BASE_TAG="v${BASE_VERSION}"
+          BASE_VERSION="${BASE_TAG#v}"
 
           # Find the next available .postN suffix
           SUFFIX=1
@@ -53,7 +52,7 @@ jobs:
           VERSION="${BASE_VERSION}.post${SUFFIX}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Resolved version: $VERSION (tag: $TAG)"
+          echo "Resolved version: $VERSION (tag: $TAG, base: $BASE_TAG)"
       
       - name: Install uv
         uses: astral-sh/setup-uv@v3
