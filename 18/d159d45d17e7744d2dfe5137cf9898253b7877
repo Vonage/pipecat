@@ -1,0 +1,19 @@
+src/pipecat/transports/vonage/video_connector.py
+  s_14d05559f5d580::t_63724c2e5418a9 129
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "18d159d45d17e7744d2dfe5137cf9898253b7877",
+  "prompts": {},
+  "sessions": {
+    "s_14d05559f5d580": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_17af0b41fffeKro7Hpytf5mLd3",
+        "model": "claude-opus-4.6"
+      },
+      "human_author": "asilvestre <antoni.silvestrepadros@vonage.com>"
+    }
+  }
+}
