@@ -211,9 +211,7 @@ class VonageFrameSerializer(FrameSerializer):
 
     async def _deserialize_json_audio(self, audio_payload: Any) -> Frame | None:
         if not isinstance(audio_payload, str):
-            logger.warning(
-                f"Vonage JSON audio field '{self._receive_audio_field}' is not a string"
-            )
+            logger.warning(f"Vonage JSON audio field '{self._receive_audio_field}' is not a string")
             return None
 
         try:
