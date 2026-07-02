@@ -7,6 +7,7 @@ metadata:
   description: Video Pipecat is an integration of the Vonage Video API connectors into the pipecat framework.
   annotations:
     vonage.com/jira-id: VPF
+    business-criticality: Tier-4
 spec:
   type: library
   owner: group:orgdata/vct
@@ -18,7 +19,7 @@ metadata:
   name: video-pipecat
   description: Video Pipecat is an integration of the Vonage Video API connectors into the pipecat framework.
   annotations:
-    github.com/project-slug: opentok/pipecat 
+    github.com/project-slug: opentok/pipecat
 spec:
   type: library
   owner: group:orgdata/vct
