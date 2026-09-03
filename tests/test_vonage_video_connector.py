@@ -3206,3 +3206,83 @@ class TestColorspaceConversion:
 
         result_array = np.frombuffer(rgba_result, dtype=np.uint8).reshape(height, width, 4)
         np.testing.assert_array_equal(result_array, rgba_orig)
+
+
+class TestVonageClientLifecycleFutureTimeout:
+    """Regression tests for bounded connect/disconnect lifecycle waits.
+
+    A pending ``_connecting_future`` (e.g. after an async session error such as
+    an "Invalid signature") must not block ``disconnect()``/``connect()``
+    indefinitely, which would stall pipeline teardown until Pipecat's cancel
+    guard fires (~20s).
+    """
+
+    def _make_setup_client(self) -> Any:
+        params = VonageVideoConnectorTransportParams()
+        client = VonageClient("app", "sess", "tok", params)
+        clock = SystemClock()  # type: ignore[no-untyped-call]
+        task_manager = TaskManager()
+        task_manager.setup(TaskManagerParams(loop=asyncio.get_running_loop()))
+        setup = FrameProcessorSetup(
+            clock=clock,
+            task_manager=task_manager,
+            pipeline_worker=SimpleNamespace(app_resources=None),  # type: ignore[arg-type]
+        )
+        return client, setup, task_manager
+
+    @pytest.mark.asyncio
+    async def test_disconnect_does_not_hang_on_pending_connecting_future(self) -> None:
+        client, setup, _ = self._make_setup_client()
+        await client.setup(setup)
+
+        # Simulate a connect that is stuck: future never resolves, and the
+        # session is reported connected so disconnect proceeds past the guard.
+        client._connecting_future = asyncio.get_running_loop().create_future()
+        client._connected = True
+        client._connection_counter = 1
+
+        with patch(
+            "pipecat.transports.vonage.client.VIDEO_CONNECTOR_TIMEOUT", timedelta(milliseconds=20)
+        ):
+            # Must return promptly (well under the real 30s / pipecat's 20s guard)
+            # rather than awaiting the pending future forever.
+            await asyncio.wait_for(client.disconnect(), timeout=2.0)
+
+        # The stuck future is left pending (another coroutine may still own it),
+        # but disconnect proceeded and tore the session down.
+        assert client._connected is False
+        await client.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_lifecycle_wait_returns_on_cancelled_future(self) -> None:
+        client, setup, _ = self._make_setup_client()
+        await client.setup(setup)
+
+        fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        fut.cancel()
+
+        # A cancelled in-flight future (connect failed and cancelled its own
+        # future) is treated as completion, not re-raised.
+        await asyncio.wait_for(
+            client._await_lifecycle_future(fut, "connection", "sess"), timeout=2.0
+        )
+        await client.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_lifecycle_wait_times_out_and_logs(self) -> None:
+        client, setup, _ = self._make_setup_client()
+        await client.setup(setup)
+
+        fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+        with patch(
+            "pipecat.transports.vonage.client.VIDEO_CONNECTOR_TIMEOUT", timedelta(milliseconds=20)
+        ):
+            # Never resolves → bounded wait returns after the timeout instead of
+            # hanging. The future is left untouched (shielded).
+            await asyncio.wait_for(
+                client._await_lifecycle_future(fut, "connection", "sess"), timeout=2.0
+            )
+
+        assert not fut.done()
+        await client.cleanup()

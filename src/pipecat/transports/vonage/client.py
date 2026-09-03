@@ -401,7 +401,9 @@ class VonageClient:
             logger.info(
                 f"Waiting for disconnection to complete before connecting to {self._session_id}"
             )
-            await self._disconnecting_future
+            await self._await_lifecycle_future(
+                self._disconnecting_future, "disconnection", self._session_id
+            )
 
         if self._connected:
             logger.info(f"Already connected to {self._session_id}")
@@ -412,7 +414,9 @@ class VonageClient:
             logger.info(f"Already connecting to {self._session_id}")
 
             # if we already connecting, await for the publish ready event
-            await self._connecting_future
+            await self._await_lifecycle_future(
+                self._connecting_future, "connection", self._session_id
+            )
             self._connection_counter += 1
             return
 
@@ -446,13 +450,46 @@ class VonageClient:
 
         await self._notify_listeners(lambda listener: listener.on_connected(self._session))
 
+    async def _await_lifecycle_future(
+        self, future: "asyncio.Future[None]", what: str, session_id: str
+    ) -> None:
+        """Await a connect/disconnect lifecycle future, bounded by the connector timeout.
+
+        A concurrent connect/disconnect on the shared client waits on the
+        in-flight operation's future. If the session errors asynchronously (for
+        example an "Invalid signature" during connect), that future can be left
+        pending, and an unbounded ``await`` here would block the caller — and,
+        because a ``CancelFrame`` is only pushed downstream after the transport's
+        ``cancel()`` returns, stall pipeline teardown until Pipecat's cancel
+        guard fires (~20s). Bounding the wait (like every other SDK-boundary
+        await in this client) turns that indefinite hang into a fast, logged
+        timeout, after which the caller proceeds with teardown. Cancellation of
+        the awaited future is treated as completion.
+        """
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(future), timeout=VIDEO_CONNECTOR_TIMEOUT.total_seconds()
+            )
+        except asyncio.CancelledError:
+            # The in-flight operation was cancelled (e.g. connect failed and
+            # cancelled its own future); nothing more to wait for.
+            if not future.cancelled():
+                raise
+        except TimeoutError:
+            logger.warning(
+                f"Timeout waiting for in-flight {what} to complete on {session_id}; "
+                "proceeding without it"
+            )
+
     async def disconnect(self) -> None:
         """Disconnect from the Vonage session."""
         if self._connecting_future is not None:
             logger.info(
                 f"Waiting for connection to complete before disconnecting from {self._session_id}"
             )
-            await self._connecting_future
+            await self._await_lifecycle_future(
+                self._connecting_future, "connection", self._session_id
+            )
 
         if not self._connected:
             logger.info(f"Already disconnected from {self._session_id}")
