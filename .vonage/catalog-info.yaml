@@ -8,6 +8,8 @@ metadata:
   annotations:
     vonage.com/jira-id: VPF
     business-criticality: Tier-4
+  tags:
+    - tier4
 spec:
   type: library
   owner: group:orgdata/vct
