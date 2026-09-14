@@ -82,6 +82,14 @@ except ModuleNotFoundError as e:
     raise ImportError(f"Missing module: {e}") from e
 
 
+class AudioInFrameMode(StrEnum):
+    """Audio frames emitted by the Vonage Video Connector input transport."""
+
+    PER_STREAM = "per_stream"
+    MIXED = "mixed"
+    BOTH = "both"
+
+
 class VonageVideoConnectorTransportParams(TransportParams):
     """Parameters for the Vonage Video Connector transport.
 
@@ -90,6 +98,7 @@ class VonageVideoConnectorTransportParams(TransportParams):
         publisher_enable_opus_dtx: Whether to enable OPUS DTX for publisher audio.
         session_enable_migration: Whether to enable session migration.
         audio_in_auto_subscribe: Whether to automatically subscribe to audio streams.
+        audio_in_frame_mode: Audio frames to emit: per-stream, mixed, or both.
         video_in_auto_subscribe: Whether to automatically subscribe to video streams.
         captions_in_auto_subscribe: Whether to automatically subscribe to captions streams.
         video_in_preferred_width: Preferred width for video input capture.
@@ -103,6 +112,7 @@ class VonageVideoConnectorTransportParams(TransportParams):
     publisher_enable_opus_dtx: bool = False
     session_enable_migration: bool = False
     audio_in_auto_subscribe: bool = True
+    audio_in_frame_mode: AudioInFrameMode = AudioInFrameMode.MIXED
     video_in_auto_subscribe: bool = False
     video_connector_log_level: str = "INFO"
     video_in_preferred_resolution: tuple[int, int] | None = None
@@ -322,6 +332,22 @@ class VonageClient:
         self._video_out_color_format: ImageFormat = VONAGE_TO_STANDARD_FORMAT_MAP[
             self._video_out_color_format_vonage
         ]
+
+    @property
+    def _wants_mixed_audio(self) -> bool:
+        """Whether the session mixed audio callback should be registered."""
+        return self._params.audio_in_enabled and self._params.audio_in_frame_mode in (
+            AudioInFrameMode.MIXED,
+            AudioInFrameMode.BOTH,
+        )
+
+    @property
+    def _wants_per_stream_audio(self) -> bool:
+        """Whether the per-subscriber audio callback should be registered."""
+        return self._params.audio_in_enabled and self._params.audio_in_frame_mode in (
+            AudioInFrameMode.PER_STREAM,
+            AudioInFrameMode.BOTH,
+        )
 
     async def setup(self, setup: FrameProcessorSetup) -> None:
         """Setup the client with task manager and event queues.
@@ -702,7 +728,9 @@ class VonageClient:
                 on_disconnected_cb=on_session_disconnected_cb,
                 on_stream_received_cb=self._on_stream_received_cb,
                 on_stream_dropped_cb=self._on_stream_dropped_cb,
-                on_audio_data_cb=self._on_session_audio_data_cb,
+                on_audio_data_cb=(
+                    self._on_session_audio_data_cb if self._wants_mixed_audio else None
+                ),
                 on_ready_for_audio_cb=audio_ready_cb,
             ):
                 logger.error(f"Could not connect to {self._session_id}")
@@ -816,7 +844,9 @@ class VonageClient:
                 on_connected_cb=on_connected_cb,
                 on_disconnected_cb=on_subscriber_disconnected_cb,
                 on_render_frame_cb=self._on_subscriber_video_data_cb,
-                on_audio_data_cb=self._on_subscriber_audio_data_cb,
+                on_audio_data_cb=(
+                    self._on_subscriber_audio_data_cb if self._wants_per_stream_audio else None
+                ),
                 on_caption_text_cb=self._on_subscriber_caption_text_cb,
             ):
                 subscribed_future.cancel()

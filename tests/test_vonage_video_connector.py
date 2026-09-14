@@ -192,6 +192,7 @@ from pipecat.transports.vonage.utils import (
     process_audio_channels,
 )
 from pipecat.transports.vonage.video_connector import (
+    AudioInFrameMode,
     SubscribeSettings,
     VonageException,
     VonageVideoConnectorInputTransport,
@@ -618,7 +619,12 @@ class TestVonageVideoConnectorTransport:
             logging=MockLoggingSettings(level=params.video_connector_log_level),
         )
         assert self._connect_callbacks is not None
-        assert call_args[1]["on_audio_data_cb"] == client._on_session_audio_data_cb
+        # the session mixed audio callback is only registered when mixed audio is wanted
+        # (audio enabled and, by default, mixed mode); otherwise it's passed as None
+        if has_audio:
+            assert call_args[1]["on_audio_data_cb"] == client._on_session_audio_data_cb
+        else:
+            assert call_args[1]["on_audio_data_cb"] is None
         assert call_args[1]["on_error_cb"] == self._connect_callbacks.on_error_cb
         assert call_args[1]["on_connected_cb"] == client._on_session_connected_cb
         assert call_args[1]["on_disconnected_cb"] == self._connect_callbacks.on_disconnected_cb
@@ -1769,7 +1775,8 @@ class TestVonageVideoConnectorTransport:
             on_connected_cb=callbacks.on_connected_cb,
             on_disconnected_cb=callbacks.on_disconnected_cb,
             on_render_frame_cb=client._on_subscriber_video_data_cb,
-            on_audio_data_cb=client._on_subscriber_audio_data_cb,
+            # default mode is mixed, so the per-subscriber audio callback is not registered
+            on_audio_data_cb=None,
             on_caption_text_cb=client._on_subscriber_caption_text_cb,
         )
         listener.on_stream_received.reset_mock()
@@ -2034,6 +2041,85 @@ class TestVonageVideoConnectorTransport:
             client_disconnect_mock.assert_called_once()
             remove_listener_mock.assert_called_once_with(1)
             assert not transport._connected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("audio_in_frame_mode", "expect_mixed_cb"),
+        [
+            (None, True),  # default mode is mixed
+            (AudioInFrameMode.MIXED, True),
+            (AudioInFrameMode.BOTH, True),
+            (AudioInFrameMode.PER_STREAM, False),
+        ],
+    )
+    async def test_vonage_client_registers_mixed_audio_cb_by_mode(
+        self,
+        audio_in_frame_mode: AudioInFrameMode | None,
+        expect_mixed_cb: bool,
+    ) -> None:
+        """Test that the session mixed audio callback is registered only when the mode wants it."""
+        params_kwargs: dict[str, Any] = {"audio_in_enabled": True}
+        if audio_in_frame_mode is not None:
+            params_kwargs["audio_in_frame_mode"] = audio_in_frame_mode
+        params = self.VonageVideoConnectorTransportParams(**params_kwargs)
+        client = await self._create_client(params)
+
+        await client.connect()
+
+        connect_kwargs = self.mock_client_instance.connect.call_args.kwargs
+        if expect_mixed_cb:
+            assert connect_kwargs["on_audio_data_cb"] == client._on_session_audio_data_cb
+        else:
+            assert connect_kwargs["on_audio_data_cb"] is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("audio_in_frame_mode", "expect_per_stream_cb"),
+        [
+            (None, False),  # default mode is mixed
+            (AudioInFrameMode.MIXED, False),
+            (AudioInFrameMode.PER_STREAM, True),
+            (AudioInFrameMode.BOTH, True),
+        ],
+    )
+    async def test_vonage_client_registers_per_subscriber_audio_cb_by_mode(
+        self,
+        audio_in_frame_mode: AudioInFrameMode | None,
+        expect_per_stream_cb: bool,
+    ) -> None:
+        """Test that the per-subscriber audio callback is registered only when the mode wants it.
+
+        The stream is still audio-subscribed regardless of mode so the mixer keeps being fed.
+        """
+        params_kwargs: dict[str, Any] = {"audio_in_enabled": True}
+        if audio_in_frame_mode is not None:
+            params_kwargs["audio_in_frame_mode"] = audio_in_frame_mode
+        params = self.VonageVideoConnectorTransportParams(**params_kwargs)
+        client = await self._create_client(params)
+
+        await client.connect()
+
+        stream_id = "audio-stream"
+        await self._subscribe_n_handle_callbacks(
+            client,
+            stream_id,
+            SubscribeSettings(subscribe_to_audio=True),
+            lambda callbacks: callbacks.on_connected_cb(
+                vonage_video_mock.models.Subscriber(
+                    stream=vonage_video_mock.models.Stream(
+                        id=stream_id, connection=DUMMY_CONNECTION
+                    )
+                )
+            ),
+        )
+
+        subscribe_kwargs = self.mock_client_instance.subscribe.call_args.kwargs
+        if expect_per_stream_cb:
+            assert subscribe_kwargs["on_audio_data_cb"] == client._on_subscriber_audio_data_cb
+        else:
+            assert subscribe_kwargs["on_audio_data_cb"] is None
+        # audio subscription itself is independent of the frame mode
+        assert subscribe_kwargs["settings"].subscribe_to_audio is True
 
     @pytest.mark.asyncio
     async def test_vonage_output_transport_initialization(self) -> None:
