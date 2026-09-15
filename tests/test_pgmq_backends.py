@@ -23,7 +23,7 @@ import unittest
 from dataclasses import dataclass
 
 from pipecat.bus import BusDataMessage
-from pipecat.utils.asyncio.task_manager import TaskManager, TaskManagerParams
+from pipecat.utils.asyncio.task_manager import TaskManager
 
 try:
     from pipecat.bus.network.pgmq import PgmqBus
@@ -33,7 +33,7 @@ try:
         PgmqBackend,
     )
 except Exception:
-    raise unittest.SkipTest("pgmq extra not installed (`pip install pipecat-ai[pgmq]`)")
+    raise unittest.SkipTest('pgmq extra not installed (`uv add "pipecat-ai[pgmq]"`)')
 
 # ---------------------------------------------------------------------------
 # IsolatedPgmqBackend: assert it speaks the right SQL to asyncpg.
@@ -238,7 +238,6 @@ class TestPgmqBusBackendInjection(unittest.IsolatedAsyncioTestCase):
             max_poll_seconds=1,
         )
         tm = TaskManager()
-        tm.setup(TaskManagerParams(loop=asyncio.get_running_loop()))
         await bus.setup(tm)
 
         await bus.start()

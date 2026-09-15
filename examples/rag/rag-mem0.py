@@ -43,9 +43,10 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.evals.transport import EvalTransportParams
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.worker import PipelineParams, PipelineWorker
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker, ProcessorUnusablePolicy
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
@@ -103,6 +104,10 @@ async def get_initial_greeting(memory_service: Mem0MemoryService) -> str:
 # We use lambdas to defer transport parameter creation until the transport
 # type is selected at runtime.
 transport_params = {
+    "eval": lambda: EvalTransportParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+    ),
     "daily": lambda: DailyParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
@@ -131,7 +136,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     # Note: You can pass the user_id as a parameter in API call
     USER_ID = "pipecat-demo-user"
 
-    logger.info(f"Starting bot")
+    logger.info("Starting bot")
 
     stt = DeepgramSTTService(api_key=os.environ["DEEPGRAM_API_KEY"])
 
@@ -156,7 +161,6 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         params=Mem0MemoryService.InputParams(
             search_limit=10,
             search_threshold=0.3,
-            api_version="v2",
             system_prompt="Based on previous conversations, I recall: \n\n",
             add_as_system_message=True,
             position=1,
@@ -174,7 +178,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     #     "llm": {
     #         "provider": "anthropic",
     #         "config": {
-    #             "model": "claude-3-5-sonnet-20240620",
+    #             "model": "claude-sonnet-4-6",
     #             "api_key": os.getenv("ANTHROPIC_API_KEY"),  # Make sure to set this in your .env
     #         }
     #     },
@@ -235,11 +239,16 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             enable_usage_metrics=True,
         ),
         idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
+        processor_unusable_policy=ProcessorUnusablePolicy.END,
     )
+
+    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
+
+    await runner.add_workers(worker)
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
-        logger.info(f"Client connected")
+        logger.info("Client connected")
         # Get personalized greeting based on user memories
         greeting = await get_initial_greeting(memory)
 
@@ -251,11 +260,9 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
-        logger.info(f"Client disconnected")
-        await worker.cancel()
+        logger.info("Client disconnected")
+        await runner.cancel()
 
-    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
-    await runner.add_workers(worker)
     await runner.run()
 
 
