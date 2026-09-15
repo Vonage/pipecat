@@ -21,11 +21,11 @@ import os
 from dotenv import load_dotenv
 from loguru import logger
 
-from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.evals.transport import EvalTransportParams
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.worker import PipelineParams, PipelineWorker
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker, ProcessorUnusablePolicy
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     AssistantTurnStoppedMessage,
@@ -51,6 +51,10 @@ load_dotenv(override=True)
 # We use lambdas to defer transport parameter creation until the transport
 # type is selected at runtime.
 transport_params = {
+    "eval": lambda: EvalTransportParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+    ),
     "daily": lambda: DailyParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
@@ -66,7 +70,7 @@ transport_params = {
 }
 
 
-async def get_weather(params: FunctionCallParams, location: str):
+async def get_current_weather(params: FunctionCallParams, location: str):
     """Return the current weather for a location.
 
     A stub that always reports the same conditions — replace with a real
@@ -85,7 +89,7 @@ async def get_weather(params: FunctionCallParams, location: str):
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
-    logger.info(f"Starting bot")
+    logger.info("Starting bot")
 
     stt = DeepgramSTTService(api_key=os.environ["DEEPGRAM_API_KEY"])
 
@@ -97,21 +101,20 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
                 "responses will be spoken aloud, so avoid emojis, bullet "
                 "points, or other formatting that can't be spoken. Respond to "
                 "what the user said in a creative, helpful, and brief way. "
-                "If the user asks about the weather, call the get_weather "
+                "If the user asks about the weather, call the get_current_weather "
                 "tool and speak the result back naturally."
             ),
         ),
     )
-    llm.register_direct_function(get_weather)
 
     tts = CartesiaTTSService(
         api_key=os.environ["CARTESIA_API_KEY"],
         settings=CartesiaTTSService.Settings(
-            voice="71a7ad14-091c-4e8e-a314-022ece01c121",  # British Reading Lady
+            voice="86e30c1d-714b-4074-a1f2-1cb6b552fb49",
         ),
     )
 
-    context = LLMContext(tools=ToolsSchema(standard_tools=[get_weather]))
+    context = LLMContext(tools=[get_current_weather])
     # `FilterIncompleteUserTurnStrategies` pairs the default detector
     # chain with `LLMTurnCompletionUserTurnStopStrategy`: detectors
     # trigger LLM inference but the public `on_user_turn_stopped` event
@@ -156,11 +159,16 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             enable_usage_metrics=True,
         ),
         idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
+        processor_unusable_policy=ProcessorUnusablePolicy.END,
     )
+
+    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
+
+    await runner.add_workers(worker)
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
-        logger.info(f"Client connected")
+        logger.info("Client connected")
         # Kick off the conversation.
         context.add_message(
             {"role": "developer", "content": "Please introduce yourself to the user."}
@@ -169,8 +177,8 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
-        logger.info(f"Client disconnected")
-        await worker.cancel()
+        logger.info("Client disconnected")
+        await runner.cancel()
 
     @user_aggregator.event_handler("on_user_turn_stopped")
     async def on_user_turn_stopped(aggregator, strategy, message: UserTurnStoppedMessage):
@@ -184,9 +192,6 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         line = f"{timestamp}assistant: {message.content}"
         logger.info(f"Transcript: {line}")
 
-    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
-
-    await runner.add_workers(worker)
     await runner.run()
 
 

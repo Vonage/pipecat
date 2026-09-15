@@ -6,9 +6,9 @@
 
 """OpenAI LLM service implementation with context aggregators."""
 
-from openai import NOT_GIVEN
+from openai import NOT_GIVEN as OPENAI_NOT_GIVEN
 
-from pipecat.adapters.services.open_ai_adapter import is_given
+from pipecat.adapters.services.open_ai_adapter import openai_is_given
 from pipecat.services.openai.base_llm import BaseOpenAILLMService
 
 
@@ -38,12 +38,14 @@ class OpenAILLMService(BaseOpenAILLMService):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=OpenAILLMService.Settings(model=...)`` instead.
+                    Will be removed in 2.0.0.
 
             service_tier: Service tier to use (e.g., "auto", "flex", "priority").
             params: Input parameters for model configuration.
 
                 .. deprecated:: 0.0.105
                     Use ``settings=OpenAILLMService.Settings(...)`` instead.
+                    Will be removed in 2.0.0.
 
             settings: Runtime-updatable settings. When provided alongside deprecated
                 parameters, ``settings`` values take precedence.
@@ -53,14 +55,14 @@ class OpenAILLMService(BaseOpenAILLMService):
         default_settings = self.Settings(
             model="gpt-4.1",
             system_instruction=None,
-            frequency_penalty=NOT_GIVEN,
-            presence_penalty=NOT_GIVEN,
-            seed=NOT_GIVEN,
-            temperature=NOT_GIVEN,
-            top_p=NOT_GIVEN,
+            frequency_penalty=OPENAI_NOT_GIVEN,
+            presence_penalty=OPENAI_NOT_GIVEN,
+            seed=OPENAI_NOT_GIVEN,
+            temperature=OPENAI_NOT_GIVEN,
+            top_p=OPENAI_NOT_GIVEN,
             top_k=None,
-            max_tokens=NOT_GIVEN,
-            max_completion_tokens=NOT_GIVEN,
+            max_tokens=OPENAI_NOT_GIVEN,
+            max_completion_tokens=OPENAI_NOT_GIVEN,
             filter_incomplete_user_turns=False,
             user_turn_completion_config=None,
             extra={},
@@ -72,7 +74,7 @@ class OpenAILLMService(BaseOpenAILLMService):
             default_settings.model = model
 
         # Handle service_tier from deprecated params
-        if params is not None and not settings and is_given(params.service_tier):
+        if params is not None and not settings and openai_is_given(params.service_tier):
             service_tier = service_tier or params.service_tier
 
         # 3. Apply params overrides — only if settings not provided

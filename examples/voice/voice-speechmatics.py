@@ -11,9 +11,10 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.evals.transport import EvalTransportParams
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.worker import PipelineParams, PipelineWorker
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker, ProcessorUnusablePolicy
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
@@ -35,6 +36,10 @@ load_dotenv(override=True)
 # We use lambdas to defer transport parameter creation until the transport
 # type is selected at runtime.
 transport_params = {
+    "eval": lambda: EvalTransportParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+    ),
     "daily": lambda: DailyParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
@@ -70,7 +75,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     - STT: https://docs.speechmatics.com/rt-api-ref
     - TTS: https://docs.speechmatics.com/text-to-speech/quickstart
     """
-    logger.info(f"Starting bot")
+    logger.info("Starting bot")
 
     async with aiohttp.ClientSession() as session:
         stt = SpeechmaticsSTTService(
@@ -93,7 +98,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             api_key=os.environ["OPENAI_API_KEY"],
             settings=OpenAILLMService.Settings(
                 temperature=0.75,
-                system_instruction="You are a helpful British assistant called Sarah in a voice conversation. Your responses will be spoken aloud, so avoid emojis, bullet points, or other formatting that can't be spoken. Always include punctuation in your responses. Give very short replies - do not give longer replies unless strictly necessary. Respond to what the user said in a concise, funny, creative and helpful way. Use `<Sn/>` tags to identify different speakers - do not use tags in your replies. Do not respond to speakers within `<PASSIVE/>` tags unless explicitly asked to.",
+                system_instruction="You are a helpful British assistant called Sarah in a voice conversation. Your responses will be spoken aloud, so avoid emojis, bullet points, or other formatting that can't be spoken. Always include punctuation in your responses. Give very short replies - do not give longer replies unless strictly necessary. Respond to what the user said in a concise, funny, creative and helpful way. Use `<Sn/>` tags to identify different speakers - do not use tags in your replies.",
             ),
         )
 
@@ -122,23 +127,25 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
                 enable_usage_metrics=True,
             ),
             idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
+            processor_unusable_policy=ProcessorUnusablePolicy.END,
         )
+
+        runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
+
+        await runner.add_workers(worker)
 
         @transport.event_handler("on_client_connected")
         async def on_client_connected(transport, client):
-            logger.info(f"Client connected")
+            logger.info("Client connected")
             # Kick off the conversation.
             context.add_message({"role": "developer", "content": "Say a short hello to the user."})
             await worker.queue_frames([LLMRunFrame()])
 
         @transport.event_handler("on_client_disconnected")
         async def on_client_disconnected(transport, client):
-            logger.info(f"Client disconnected")
-            await worker.cancel()
+            logger.info("Client disconnected")
+            await runner.cancel()
 
-        runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
-
-        await runner.add_workers(worker)
         await runner.run()
 
 

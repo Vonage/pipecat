@@ -11,14 +11,13 @@ import os
 from dotenv import load_dotenv
 from loguru import logger
 
-from pipecat.adapters.schemas.function_schema import FunctionSchema
-from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.evals.transport import EvalTransportParams
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.observers.startup_timing_observer import StartupTimingObserver
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.worker import PipelineParams, PipelineWorker
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker, ProcessorUnusablePolicy
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
@@ -33,17 +32,29 @@ from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
+from pipecat.turns.user_turn_strategies import FilterIncompleteUserTurnStrategies
 from pipecat.workers.runner import WorkerRunner
 
 load_dotenv(override=True)
 
 
-async def fetch_weather_from_api(params: FunctionCallParams):
+async def get_current_weather(params: FunctionCallParams, location: str, format: str):
+    """Get the current weather.
+
+    Args:
+        location: The city and state, e.g. "San Francisco, CA".
+        format: The temperature unit to use. Must be either "celsius" or "fahrenheit". Infer this from the user's location.
+    """
     await asyncio.sleep(0.25)
     await params.result_callback({"conditions": "nice", "temperature": "75"})
 
 
-async def fetch_restaurant_recommendation(params: FunctionCallParams):
+async def get_restaurant_recommendation(params: FunctionCallParams, location: str):
+    """Get a restaurant recommendation.
+
+    Args:
+        location: The city and state, e.g. "San Francisco, CA".
+    """
     await asyncio.sleep(0.1)
     await params.result_callback({"name": "The Golden Dragon"})
 
@@ -51,6 +62,10 @@ async def fetch_restaurant_recommendation(params: FunctionCallParams):
 # We use lambdas to defer transport parameter creation until the transport
 # type is selected at runtime.
 transport_params = {
+    "eval": lambda: EvalTransportParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+    ),
     "daily": lambda: DailyParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
@@ -67,14 +82,14 @@ transport_params = {
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
-    logger.info(f"Starting bot")
+    logger.info("Starting bot")
 
     stt = DeepgramSTTService(api_key=os.environ["DEEPGRAM_API_KEY"])
 
     tts = CartesiaTTSService(
         api_key=os.environ["CARTESIA_API_KEY"],
         settings=CartesiaTTSService.Settings(
-            voice="71a7ad14-091c-4e8e-a314-022ece01c121",  # British Reading Lady
+            voice="86e30c1d-714b-4074-a1f2-1cb6b552fb49",
         ),
     )
 
@@ -85,42 +100,13 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         ),
     )
 
-    llm.register_function("get_current_weather", fetch_weather_from_api)
-    llm.register_function("get_restaurant_recommendation", fetch_restaurant_recommendation)
-
-    weather_function = FunctionSchema(
-        name="get_current_weather",
-        description="Get the current weather",
-        properties={
-            "location": {
-                "type": "string",
-                "description": "The city and state, e.g. San Francisco, CA",
-            },
-            "format": {
-                "type": "string",
-                "enum": ["celsius", "fahrenheit"],
-                "description": "The temperature unit to use. Infer this from the user's location.",
-            },
-        },
-        required=["location", "format"],
-    )
-    restaurant_function = FunctionSchema(
-        name="get_restaurant_recommendation",
-        description="Get a restaurant recommendation",
-        properties={
-            "location": {
-                "type": "string",
-                "description": "The city and state, e.g. San Francisco, CA",
-            },
-        },
-        required=["location"],
-    )
-    tools = ToolsSchema(standard_tools=[weather_function, restaurant_function])
-
-    context = LLMContext(tools=tools)
+    context = LLMContext(tools=[get_current_weather, get_restaurant_recommendation])
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
-        user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
+        user_params=LLMUserAggregatorParams(
+            vad_analyzer=SileroVADAnalyzer(),
+            user_turn_strategies=FilterIncompleteUserTurnStrategies(),
+        ),
     )
 
     pipeline = Pipeline(
@@ -146,7 +132,12 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         ),
         idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
         observers=[latency_observer, startup_observer],
+        processor_unusable_policy=ProcessorUnusablePolicy.END,
     )
+
+    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
+
+    await runner.add_workers(worker)
 
     @latency_observer.event_handler("on_first_bot_speech_latency")
     async def on_first_bot_speech_latency(observer, latency_seconds):
@@ -158,9 +149,23 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     @startup_observer.event_handler("on_startup_timing_report")
     async def on_startup_timing_report(observer, report):
+        # Getting ready runs concurrently, so the longest piece of work is what
+        # the phase cost. The StartFrame then reaches processors one at a time,
+        # so what each spends on it adds up.
         logger.info(f"Total startup: {report.total_duration_secs:.3f}s")
+
+        # Every processor is set up, so listing them all gives the pipeline it
+        # ran against, which is what the phase totals below are spread over.
+        logger.info(f"  Setup (concurrent): {report.setup_phase_secs:.3f}s")
+        if report.warmup:
+            logger.info(f"    warming deferred imports: {report.warmup.duration_secs:.3f}s")
         for timing in report.processor_timings:
-            logger.info(f"  {timing.processor_name}: {timing.duration_secs:.3f}s")
+            logger.info(f"    {timing.processor_name}: {timing.setup_duration_secs:.3f}s")
+
+        logger.info(f"  Start (sequential): {report.start_phase_secs:.3f}s")
+        for timing in report.processor_timings:
+            if timing.start_duration_secs >= 0.001:
+                logger.info(f"    {timing.processor_name}: {timing.start_duration_secs:.3f}s")
 
     @startup_observer.event_handler("on_transport_timing_report")
     async def on_transport_timing_report(observer, report):
@@ -184,12 +189,16 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     @latency_observer.event_handler("on_latency_breakdown")
     async def on_latency_breakdown(observer, breakdown):
-        for event in breakdown.chronological_events():
-            logger.info(f"  {event}")
+        # Each line is one part of the turn, in the order it happened, and the
+        # lines sum to the latency `UserBotLatencyObserver` reports through
+        # `on_latency_measured`. A `config:` owner means the time is governed
+        # by a setting rather than by how fast a service answered.
+        for line in breakdown.turn_contribution_lines():
+            logger.info(f"  {line}")
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
-        logger.info(f"Client connected")
+        logger.info("Client connected")
         # Kick off the conversation.
         context.add_message(
             {"role": "developer", "content": "Please introduce yourself to the user."}
@@ -198,12 +207,9 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
-        logger.info(f"Client disconnected")
-        await worker.cancel()
+        logger.info("Client disconnected")
+        await runner.cancel()
 
-    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
-
-    await runner.add_workers(worker)
     await runner.run()
 
 
