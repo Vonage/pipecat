@@ -31,7 +31,7 @@ Architecture::
     ReviewWorker (ReplyToolMixin + UIWorker, keep_history=True):
       ├── inherited: reply(answer, scroll_to, highlight, select_text, fills, click)
       ├── @tool start_review(answer, paragraph_ref, paragraph_text)
-      │     └── start_ui_job_group("clarity", "tone", ...)
+      │     └── request_job_group("clarity", "tone", params=JobGroupParams(...))
       ├── @ui_event("note_click") → scroll_to + select_text(ref)
       └── on_job_response → emit add_note for each reviewer that completes
 
@@ -64,13 +64,14 @@ import random
 from dotenv import load_dotenv
 from loguru import logger
 
-from pipecat.adapters.schemas.tools_schema import ToolsSchema
+from pipecat.adapters.schemas.direct_function import tool_options
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.bus.messages import BusJobRequestMessage, BusJobResponseMessage
+from pipecat.evals.transport import EvalTransportParams
 from pipecat.frames.frames import LLMRunFrame
-from pipecat.pipeline.job_context import JobError, JobStatus
+from pipecat.pipeline.job_context import JobError, JobGroupParams, JobStatus
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.worker import PipelineParams, PipelineWorker
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker, ProcessorUnusablePolicy
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
@@ -94,6 +95,10 @@ load_dotenv(override=True)
 MAIN_NAME = "main"
 
 transport_params = {
+    "eval": lambda: EvalTransportParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+    ),
     "daily": lambda: DailyParams(audio_in_enabled=True, audio_out_enabled=True),
     "webrtc": lambda: TransportParams(audio_in_enabled=True, audio_out_enabled=True),
 }
@@ -348,7 +353,7 @@ class ReviewWorker(ReplyToolMixin, UIWorker):
     ):
         """Kick off a parallel review of one paragraph.
 
-        Spawns the clarity and tone workers via ``start_ui_job_group``.
+        Spawns the clarity and tone workers via ``request_job_group``.
         Workers run in the background; their progress is forwarded to the
         page automatically. As each completes, ``on_job_response``
         translates the response into an ``add_note`` UI command.
@@ -362,11 +367,13 @@ class ReviewWorker(ReplyToolMixin, UIWorker):
                 this directly.
         """
         logger.info(f"{self}: start_review(ref={paragraph_ref!r})")
-        job_id = await self.start_ui_job_group(
+        job_id = await self.request_job_group(
             "clarity",
             "tone",
-            payload={"ref": paragraph_ref, "text": paragraph_text},
-            label=f"Reviewing ¶ {paragraph_ref}",
+            params=JobGroupParams(
+                payload={"ref": paragraph_ref, "text": paragraph_text},
+                label=f"Reviewing ¶ {paragraph_ref}",
+            ),
         )
         # Remember which paragraph this review is for so we can attach
         # each worker's response to the right note.
@@ -405,6 +412,7 @@ class ReviewWorker(ReplyToolMixin, UIWorker):
         await self.select_text(ref)
 
 
+@tool_options(cancel_on_interruption=False, timeout_secs=30)
 async def answer_about_screen(params: FunctionCallParams, query: str):
     """Forward the user's request to the screen-aware review worker.
 
@@ -428,22 +436,19 @@ async def answer_about_screen(params: FunctionCallParams, query: str):
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     logger.info("Starting document-review bot")
 
-    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
-
     stt = DeepgramSTTService(api_key=os.environ["DEEPGRAM_API_KEY"])
     tts = CartesiaTTSService(
         api_key=os.environ["CARTESIA_API_KEY"],
         settings=CartesiaTTSService.Settings(
-            voice=os.getenv("CARTESIA_VOICE_ID", "71a7ad14-091c-4e8e-a314-022ece01c121"),
+            voice=os.getenv("CARTESIA_VOICE_ID", "86e30c1d-714b-4074-a1f2-1cb6b552fb49"),
         ),
     )
     llm = OpenAILLMService(
         api_key=os.environ["OPENAI_API_KEY"],
         settings=OpenAILLMService.Settings(system_instruction=VOICE_PROMPT),
     )
-    llm.register_direct_function(answer_about_screen, cancel_on_interruption=False, timeout_secs=30)
 
-    context = LLMContext(tools=ToolsSchema(standard_tools=[answer_about_screen]))
+    context = LLMContext(tools=[answer_about_screen])
     aggregators = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
@@ -466,6 +471,16 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         name=MAIN_NAME,
         params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
         idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
+        processor_unusable_policy=ProcessorUnusablePolicy.END,
+    )
+
+    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
+
+    await runner.add_workers(
+        ReviewWorker(),
+        ClarityReviewer("clarity"),
+        ToneReviewer("tone"),
+        worker,
     )
 
     @transport.event_handler("on_client_connected")
@@ -487,13 +502,6 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     async def on_client_disconnected(transport, client):
         logger.info("Client disconnected")
         await runner.cancel()
-
-    await runner.add_workers(
-        ReviewWorker(),
-        ClarityReviewer("clarity"),
-        ToneReviewer("tone"),
-        worker,
-    )
 
     await runner.run()
 
