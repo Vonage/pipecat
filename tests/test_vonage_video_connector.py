@@ -2078,7 +2078,7 @@ class TestVonageVideoConnectorTransport:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("audio_in_frame_mode", "expect_mixed_cb"),
+        ("audio_in_frame_source", "expect_mixed_cb"),
         [
             (None, True),  # default mode is mixed
             (AudioInFrameSource.MIXED, True),
@@ -2088,13 +2088,13 @@ class TestVonageVideoConnectorTransport:
     )
     async def test_vonage_client_registers_mixed_audio_cb_by_mode(
         self,
-        audio_in_frame_mode: AudioInFrameSource | None,
+        audio_in_frame_source: AudioInFrameSource | None,
         expect_mixed_cb: bool,
     ) -> None:
         """Test that the session mixed audio callback is registered only when the mode wants it."""
         params_kwargs: dict[str, Any] = {"audio_in_enabled": True}
-        if audio_in_frame_mode is not None:
-            params_kwargs["audio_in_frame_mode"] = audio_in_frame_mode
+        if audio_in_frame_source is not None:
+            params_kwargs["audio_in_frame_source"] = audio_in_frame_source
         params = self.VonageVideoConnectorTransportParams(**params_kwargs)
         client = await self._create_client(params)
 
@@ -2108,7 +2108,7 @@ class TestVonageVideoConnectorTransport:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("audio_in_frame_mode", "expect_individual_cb"),
+        ("audio_in_frame_source", "expect_individual_cb"),
         [
             (None, False),  # default mode is mixed
             (AudioInFrameSource.MIXED, False),
@@ -2118,7 +2118,7 @@ class TestVonageVideoConnectorTransport:
     )
     async def test_vonage_client_registers_per_subscriber_audio_cb_by_mode(
         self,
-        audio_in_frame_mode: AudioInFrameSource | None,
+        audio_in_frame_source: AudioInFrameSource | None,
         expect_individual_cb: bool,
     ) -> None:
         """Test that the per-subscriber audio callback is registered only when the mode wants it.
@@ -2126,8 +2126,8 @@ class TestVonageVideoConnectorTransport:
         The stream is still audio-subscribed regardless of mode so the mixer keeps being fed.
         """
         params_kwargs: dict[str, Any] = {"audio_in_enabled": True}
-        if audio_in_frame_mode is not None:
-            params_kwargs["audio_in_frame_mode"] = audio_in_frame_mode
+        if audio_in_frame_source is not None:
+            params_kwargs["audio_in_frame_source"] = audio_in_frame_source
         params = self.VonageVideoConnectorTransportParams(**params_kwargs)
         client = await self._create_client(params)
 

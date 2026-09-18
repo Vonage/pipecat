@@ -103,7 +103,7 @@ class VonageVideoConnectorTransportParams(TransportParams):
         publisher_enable_opus_dtx: Whether to enable OPUS DTX for publisher audio.
         session_enable_migration: Whether to enable session migration.
         audio_in_auto_subscribe: Whether to automatically subscribe to audio streams.
-        audio_in_frame_mode: Audio source frames to emit: individual, mixed, or both.
+        audio_in_frame_source: Audio source frames to emit: individual, mixed, or both.
         video_in_auto_subscribe: Whether to automatically subscribe to video streams.
         captions_in_auto_subscribe: Whether to automatically subscribe to captions streams.
         video_in_preferred_width: Preferred width for video input capture.
@@ -117,7 +117,7 @@ class VonageVideoConnectorTransportParams(TransportParams):
     publisher_enable_opus_dtx: bool = False
     session_enable_migration: bool = False
     audio_in_auto_subscribe: bool = True
-    audio_in_frame_mode: AudioInFrameSource = AudioInFrameSource.MIXED
+    audio_in_frame_source: AudioInFrameSource = AudioInFrameSource.MIXED
     video_in_auto_subscribe: bool = False
     video_connector_log_level: str = "INFO"
     video_in_preferred_resolution: tuple[int, int] | None = None
@@ -341,7 +341,7 @@ class VonageClient:
     @property
     def _wants_mixed_audio(self) -> bool:
         """Whether the session mixed audio callback should be registered."""
-        return self._params.audio_in_enabled and self._params.audio_in_frame_mode in (
+        return self._params.audio_in_enabled and self._params.audio_in_frame_source in (
             AudioInFrameSource.MIXED,
             AudioInFrameSource.BOTH,
         )
@@ -349,7 +349,7 @@ class VonageClient:
     @property
     def _wants_individual_audio(self) -> bool:
         """Whether the per-subscriber audio callback should be registered."""
-        return self._params.audio_in_enabled and self._params.audio_in_frame_mode in (
+        return self._params.audio_in_enabled and self._params.audio_in_frame_source in (
             AudioInFrameSource.INDIVIDUAL,
             AudioInFrameSource.BOTH,
         )
