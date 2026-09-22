@@ -1,0 +1,22 @@
+src/pipecat/transports/vonage/client.py
+  7fa0c0b510b583bb 867
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "e3abb4b6d71db2bc54cda722f5bade3250dbd8c1",
+  "prompts": {
+    "7fa0c0b510b583bb": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_23cb8b367ffe6yYAFMa4dbv9ym",
+        "model": "github-copilot/claude-sonnet-4.6"
+      },
+      "human_author": "asilvestre",
+      "total_additions": 1,
+      "total_deletions": 1,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    }
+  }
+}

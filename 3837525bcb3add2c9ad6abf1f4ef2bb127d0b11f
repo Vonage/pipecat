@@ -1,0 +1,21 @@
+src/pipecat/transports/vonage/client.py
+  s_6cc13cbcc7f081::t_fc9dbfa8a19b69 867-868
+  s_6cc13cbcc7f081::t_7676bdded625d3 20
+  s_6cc13cbcc7f081::t_99f3674b046668 105,109-110
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "3837525bcb3add2c9ad6abf1f4ef2bb127d0b11f",
+  "prompts": {},
+  "sessions": {
+    "s_6cc13cbcc7f081": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "7fa42e2a-5e62-49bd-b3f6-70d1c67995d0",
+        "model": "claude-sonnet-4.6"
+      },
+      "human_author": "asilvestre <antoni.silvestrepadros@vonage.com>"
+    }
+  }
+}

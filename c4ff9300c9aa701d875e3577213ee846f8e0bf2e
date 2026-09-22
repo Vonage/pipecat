@@ -1,0 +1,29 @@
+src/pipecat/transports/vonage/video_connector.py
+  s_e5034029d8dd04::t_e422c08c853c91 28-30
+src/pipecat/transports/vonage/client.py
+  s_6cc13cbcc7f081::t_fc9dbfa8a19b69 867-868
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.10",
+  "base_commit_sha": "c4ff9300c9aa701d875e3577213ee846f8e0bf2e",
+  "prompts": {},
+  "sessions": {
+    "s_6cc13cbcc7f081": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "7fa42e2a-5e62-49bd-b3f6-70d1c67995d0",
+        "model": "claude-sonnet-4.6"
+      },
+      "human_author": "asilvestre <antoni.silvestrepadros@vonage.com>"
+    },
+    "s_e5034029d8dd04": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1e3f7043bffeex3jMxP4Dqoeez",
+        "model": "claude-sonnet-4.6"
+      },
+      "human_author": "asilvestre <antoni.silvestrepadros@vonage.com>"
+    }
+  }
+}
