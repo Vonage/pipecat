@@ -55,6 +55,7 @@ from pipecat.utils.context.aggregated_frame_sequencer import AggregatedFrameSequ
 from pipecat.utils.deprecation import deprecated
 from pipecat.utils.errors import ErrorCategory
 from pipecat.utils.frame_queue import FrameQueue
+from pipecat.utils.string import resolve_sentence_tokenizer_language
 from pipecat.utils.text.base_text_filter import BaseTextFilter
 from pipecat.utils.text.pattern_pair_aggregator import PatternMatch
 from pipecat.utils.text.simple_text_aggregator import SimpleTextAggregator
@@ -257,6 +258,10 @@ class TTSService(AIService):
             **kwargs,
         )
 
+        aggregation_language = resolve_sentence_tokenizer_language(
+            self._settings.language if is_given(self._settings.language) else None
+        )
+
         # Convert Language enum to service-specific format at init time.
         # Runtime updates are handled by _update_settings(), but init-time
         # settings bypass that path and need explicit conversion.
@@ -327,7 +332,10 @@ class TTSService(AIService):
         self._append_trailing_space: bool = append_trailing_space
         self._init_sample_rate = sample_rate
         self._sample_rate = 0
-        self._text_aggregator = SimpleTextAggregator(aggregation_type=self._text_aggregation_mode)
+        self._text_aggregator = SimpleTextAggregator(
+            aggregation_type=self._text_aggregation_mode,
+            language=aggregation_language,
+        )
 
         self._skip_aggregator_types: list[str] = skip_aggregator_types or []
         self._text_transforms: list[
@@ -402,7 +410,7 @@ class TTSService(AIService):
         #           must be emitted in-order relative to surrounding audio contexts.
         #   None  – shutdown sentinel (sent by stop()).
         # Created once here so it survives interruptions: on interruption we call reset()
-        # which drops non-UninterruptibleFrame items while keeping uninterruptible ones
+        # which drops interruptible items while keeping uninterruptible ones
         # (e.g. FunctionCallResultFrame) that must not be lost mid-flight.
         self._serialization_queue: FrameQueue = FrameQueue(
             frame_getter=lambda item: item if isinstance(item, Frame) else None
@@ -594,6 +602,11 @@ class TTSService(AIService):
         """
         pass
 
+    @property
+    def text_aggregation_language(self) -> str:
+        """Current sentence tokenizer language, derived from TTS settings."""
+        return self._text_aggregator.language
+
     async def setup(self, setup: FrameProcessorSetup):
         """Set up the service.
 
@@ -685,6 +698,7 @@ class TTSService(AIService):
         Returns:
             Dict mapping changed field names to their previous values.
         """
+        language = delta.language
         # Translate language *before* applying so the stored value is canonical.
         # Raw strings are first converted to Language enums for proper resolution.
         if (
@@ -705,6 +719,9 @@ class TTSService(AIService):
                 delta.language = converted
 
         changed = await super()._update_settings(delta)
+
+        if is_given(language):
+            self._text_aggregator.set_language(language)
 
         return changed
 
@@ -1046,7 +1063,7 @@ class TTSService(AIService):
         await self.reset_word_timestamps()
 
         await self._stop_audio_context_task()
-        # Drops non-UninterruptibleFrame items while keeping uninterruptible ones
+        # Drops interruptible items while keeping uninterruptible ones
         # (e.g. FunctionCallResultFrame) that must not be lost mid-flight.
         self._serialization_queue.reset()
         audio_contexts = self.get_audio_contexts()
@@ -1059,11 +1076,11 @@ class TTSService(AIService):
         self._create_audio_context_task()
         # When pause_frame_processing=True, the process task may be blocked at
         # __process_event.wait() because pause_processing_frames() was called
-        # after LLMFullResponseEndFrame and an UninterruptibleFrame was dequeued
+        # after LLMFullResponseEndFrame and an uninterruptible frame was dequeued
         # before the interrupt arrived. _start_interruption() in the base class
-        # handles the common case (non-uninterruptible frames) by cancelling and
-        # recreating the process task. But when _start_interruption() detects an
-        # UninterruptibleFrame it only resets the queue, leaving the process task
+        # handles the common case (interruptible frames) by cancelling and
+        # recreating the process task. But when _start_interruption() finds an
+        # uninterruptible frame it only resets the queue, leaving the process task
         # blocked. BotStoppedSpeakingFrame never arrives (no audio played), so we
         # must resume here to prevent a permanent deadlock.
         await self._maybe_resume_frame_processing()
@@ -1297,6 +1314,7 @@ class TTSService(AIService):
                 prepared_text,
                 append_to_context=self._tts_contexts[context_id].append_to_context,
                 build_tracker=not self._push_text_frames,
+                language=self.text_aggregation_language,
             ),
             context_id,
         )
