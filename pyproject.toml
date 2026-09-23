@@ -153,7 +153,7 @@ tavus = [ "pipecat-ai[daily]" ]
 together = []
 tracing = [ "opentelemetry-sdk>=1.33.0,<2", "opentelemetry-api>=1.33.0,<2", "opentelemetry-instrumentation>=0.54b0,<1" ]
 ultravox = []
-vonage-video-connector = [ "vonage-video-connector~=1.0.2; python_version=='3.13' and platform_system=='Linux'" ]
+vonage-video-connector = [ "vonage-video-connector~=1.0.3; python_version>='3.11' and platform_system=='Linux'" ]
 webrtc = [ "aiortc>=1.14.0,<2", "opencv-python-headless>=4.11.0.86,<5" ]
 webrtc-video = [ "pipecat-ai[webrtc]" ]
 websocket = [ "fastapi>=0.115.6,<1" ]
@@ -194,14 +194,12 @@ docs = [
 ]
 
 [tool.uv]
-# The Vonage-Google package conflict — vonage-video-connector pins pydantic < 2.12,
-# while google-genai >= 2.9.0 (which GeminiSTTService needs) requires pydantic >= 2.12.5
-# — must not prevent GeminiSTTService usage in environments where the Vonage connector
-# can't be installed anyway. Resolving the one environment where it can be installed
-# (Python 3.13 on Linux) apart from every other keeps the rest of the lock current.
+# vonage-video-connector ships Linux-only wheels (Python 3.11+ via abi3). Resolving
+# the Linux environment where it installs apart from every other keeps the rest of
+# the lock current when the connector or its transitive pins move.
 environments = [
-    "python_full_version == '3.13.*' and sys_platform == 'linux'",
-    "python_full_version != '3.13.*' or sys_platform != 'linux'",
+    "sys_platform == 'linux'",
+    "sys_platform != 'linux'",
 ]
 
 [tool.setuptools.packages.find]
