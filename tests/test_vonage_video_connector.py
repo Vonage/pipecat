@@ -651,11 +651,11 @@ class TestVonageVideoConnectorTransport:
         )
         assert self._connect_callbacks is not None
         # the session mixed audio callback is only registered when mixed audio is wanted
-        # (audio enabled and, by default, mixed mode); otherwise it's passed as None
+        # (audio enabled and, by default, mixed mode); otherwise it's left out
         if has_audio:
             assert call_args[1]["on_audio_data_cb"] == client._on_session_audio_data_cb
         else:
-            assert call_args[1]["on_audio_data_cb"] is None
+            assert "on_audio_data_cb" not in call_args[1]
         assert call_args[1]["on_error_cb"] == self._connect_callbacks.on_error_cb
         assert call_args[1]["on_connected_cb"] == client._on_session_connected_cb
         assert call_args[1]["on_disconnected_cb"] == self._connect_callbacks.on_disconnected_cb
@@ -1807,7 +1807,6 @@ class TestVonageVideoConnectorTransport:
             on_disconnected_cb=callbacks.on_disconnected_cb,
             on_render_frame_cb=client._on_subscriber_video_data_cb,
             # default mode is mixed, so the per-subscriber audio callback is not registered
-            on_audio_data_cb=None,
             on_caption_text_cb=client._on_subscriber_caption_text_cb,
         )
         listener.on_stream_received.reset_mock()
@@ -2104,7 +2103,7 @@ class TestVonageVideoConnectorTransport:
         if expect_mixed_cb:
             assert connect_kwargs["on_audio_data_cb"] == client._on_session_audio_data_cb
         else:
-            assert connect_kwargs["on_audio_data_cb"] is None
+            assert "on_audio_data_cb" not in connect_kwargs
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -2151,7 +2150,7 @@ class TestVonageVideoConnectorTransport:
         if expect_individual_cb:
             assert subscribe_kwargs["on_audio_data_cb"] == client._on_subscriber_audio_data_cb
         else:
-            assert subscribe_kwargs["on_audio_data_cb"] is None
+            assert "on_audio_data_cb" not in subscribe_kwargs
         # audio subscription itself is independent of the frame mode
         assert subscribe_kwargs["settings"].subscribe_to_audio is True
 

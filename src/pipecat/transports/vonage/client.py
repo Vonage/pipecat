@@ -709,6 +709,12 @@ class VonageClient:
             self._sdk_event_cb_to_loop(async_cb())
 
         def connect_proc() -> None:
+            # the connector rejects None, so the callback is left out entirely when unused
+            session_audio_kwargs: dict[str, Any] = (
+                {"on_audio_data_cb": self._on_session_audio_data_cb}
+                if self._wants_mixed_audio
+                else {}
+            )
             if not self._client.connect(
                 application_id=self._application_id,
                 session_id=self._session_id,
@@ -740,10 +746,8 @@ class VonageClient:
                 on_disconnected_cb=on_session_disconnected_cb,
                 on_stream_received_cb=self._on_stream_received_cb,
                 on_stream_dropped_cb=self._on_stream_dropped_cb,
-                on_audio_data_cb=(
-                    self._on_session_audio_data_cb if self._wants_mixed_audio else None
-                ),
                 on_ready_for_audio_cb=audio_ready_cb,
+                **session_audio_kwargs,
             ):
                 logger.error(f"Could not connect to {self._session_id}")
                 raise VonageException("Could not connect to session")
@@ -830,6 +834,11 @@ class VonageClient:
             self._sdk_event_cb_to_loop(async_cb())
 
         async def process() -> None:
+            subscriber_audio_kwargs: dict[str, Any] = (
+                {"on_audio_data_cb": self._on_subscriber_audio_data_cb}
+                if self._wants_individual_audio
+                else {}
+            )
             logger.info(
                 f"Subscribing to stream {stream.id} audio={params.subscribe_to_audio} "
                 f"video={params.subscribe_to_video} captions={params.subscribe_to_captions} "
@@ -856,10 +865,8 @@ class VonageClient:
                 on_connected_cb=on_connected_cb,
                 on_disconnected_cb=on_subscriber_disconnected_cb,
                 on_render_frame_cb=self._on_subscriber_video_data_cb,
-                on_audio_data_cb=(
-                    self._on_subscriber_audio_data_cb if self._wants_individual_audio else None
-                ),
                 on_caption_text_cb=self._on_subscriber_caption_text_cb,
+                **subscriber_audio_kwargs,
             ):
                 subscribed_future.cancel()
                 raise VonageException(f"Could not subscribe to stream {stream.id}")
