@@ -194,15 +194,6 @@ docs = [
     "sphinx-rtd-theme",
 ]
 
-[tool.uv]
-# vonage-video-connector ships Linux-only wheels (Python 3.11+ via abi3). Resolving
-# the Linux environment where it installs apart from every other keeps the rest of
-# the lock current when the connector or its transitive pins move.
-environments = [
-    "sys_platform == 'linux'",
-    "sys_platform != 'linux'",
-]
-
 [tool.setuptools.packages.find]
 where = ["src"]
 
