@@ -22,16 +22,14 @@ from datetime import datetime
 from dotenv import load_dotenv
 from loguru import logger
 
-from pipecat.adapters.schemas.function_schema import FunctionSchema
-from pipecat.adapters.schemas.tools_schema import ToolsSchema
-from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.adapters.schemas.direct_function import tool_options
+from pipecat.evals.transport import EvalTransportParams
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.worker import PipelineParams, PipelineWorker
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker, ProcessorUnusablePolicy
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
-    LLMUserAggregatorParams,
 )
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
@@ -45,47 +43,34 @@ from pipecat.workers.runner import WorkerRunner
 load_dotenv(override=True)
 
 
-async def fetch_weather_from_api(params: FunctionCallParams):
+@tool_options(cancel_on_interruption=False)
+async def get_current_weather(params: FunctionCallParams, location: str, format: str):
+    """Get the current weather.
+
+    Args:
+        location: The city and state, e.g. "San Francisco, CA".
+        format: The temperature unit to use. Must be either "celsius" or "fahrenheit". Infer this from the user's location.
+    """
     # Simulate a long-running API call so we can demonstrate that the
     # conversation continues while the tool is in flight.
     await asyncio.sleep(10)
-    temperature = (
-        random.randint(60, 85)
-        if params.arguments["format"] == "fahrenheit"
-        else random.randint(15, 30)
-    )
+    temperature = random.randint(60, 85) if format == "fahrenheit" else random.randint(15, 30)
     await params.result_callback(
         {
             "conditions": "nice",
             "temperature": temperature,
-            "location": params.arguments["location"],
-            "format": params.arguments["format"],
+            "location": location,
+            "format": format,
             "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
         }
     )
 
 
-weather_function = FunctionSchema(
-    name="get_current_weather",
-    description="Get the current weather",
-    properties={
-        "location": {
-            "type": "string",
-            "description": "The city and state, e.g. San Francisco, CA",
-        },
-        "format": {
-            "type": "string",
-            "enum": ["celsius", "fahrenheit"],
-            "description": "The temperature unit to use. Infer this from the users location.",
-        },
-    },
-    required=["location", "format"],
-)
-
-tools = ToolsSchema(standard_tools=[weather_function])
-
-
 transport_params = {
+    "eval": lambda: EvalTransportParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+    ),
     "daily": lambda: DailyParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
@@ -102,7 +87,7 @@ transport_params = {
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
-    logger.info(f"Starting bot")
+    logger.info("Starting bot")
 
     system_instruction = (
         "You are a friendly assistant. The user and you will engage in a spoken "
@@ -124,16 +109,20 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         ),
     )
 
-    llm.register_function(
-        "get_current_weather",
-        fetch_weather_from_api,
-        cancel_on_interruption=False,
-    )
-
-    context = LLMContext(tools=tools)
+    # Nova Sonic doesn't emit user-turn frames. To get them (for RTVI
+    # speech events, turn observers, etc.) uncomment the local-VAD
+    # imports + `user_params=` below. See realtime-aws-nova-sonic.py for
+    # the full discussion.
+    #
+    # from pipecat.audio.vad.silero import SileroVADAnalyzer
+    # from pipecat.processors.aggregators.llm_response_universal import (
+    #     LLMUserAggregatorParams,
+    # )
+    # cancel_on_interruption=False (set via @tool_options) makes this an async function call.
+    context = LLMContext(tools=[get_current_weather])
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
-        user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
+        # user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
     )
 
     pipeline = Pipeline(
@@ -153,11 +142,16 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             enable_usage_metrics=True,
         ),
         idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
+        processor_unusable_policy=ProcessorUnusablePolicy.END,
     )
+
+    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
+
+    await runner.add_workers(worker)
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
-        logger.info(f"Client connected")
+        logger.info("Client connected")
         context.add_message(
             {"role": "developer", "content": "Please introduce yourself to the user."}
         )
@@ -165,11 +159,9 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
-        logger.info(f"Client disconnected")
-        await worker.cancel()
+        logger.info("Client disconnected")
+        await runner.cancel()
 
-    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
-    await runner.add_workers(worker)
     await runner.run()
 
 

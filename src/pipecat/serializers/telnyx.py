@@ -29,8 +29,10 @@ from pipecat.frames.frames import (
     InputAudioRawFrame,
     InputDTMFFrame,
     InterruptionFrame,
-    StartFrame,
+    OutputTransportMessageFrame,
+    OutputTransportMessageUrgentFrame,
 )
+from pipecat.processors.frame_processor import FrameProcessorSetup
 from pipecat.serializers.base_serializer import FrameSerializer
 
 
@@ -108,17 +110,21 @@ class TelnyxFrameSerializer(FrameSerializer):
         self._telnyx_sample_rate = self._params.telnyx_sample_rate
         self._sample_rate = 0  # Pipeline input rate
 
-        self._input_resampler = create_stream_resampler()
-        self._output_resampler = create_stream_resampler()
+        self._input_resampler = create_stream_resampler(
+            clear_after_secs=self._params.resampler_clear_after_secs
+        )
+        self._output_resampler = create_stream_resampler(
+            clear_after_secs=self._params.resampler_clear_after_secs
+        )
         self._hangup_attempted = False
 
-    async def setup(self, frame: StartFrame):
+    async def setup(self, setup: FrameProcessorSetup):
         """Sets up the serializer with pipeline configuration.
 
         Args:
-            frame: The StartFrame containing pipeline configuration.
+            setup: Configuration object containing setup parameters.
         """
-        self._sample_rate = self._params.sample_rate or frame.audio_in_sample_rate
+        self._sample_rate = self._params.sample_rate or setup.audio_in_sample_rate
 
     async def serialize(self, frame: Frame) -> str | bytes | None:
         """Serializes a Pipecat frame to Telnyx WebSocket format.
@@ -172,6 +178,10 @@ class TelnyxFrameSerializer(FrameSerializer):
             }
 
             return json.dumps(answer)
+        elif isinstance(frame, (OutputTransportMessageFrame, OutputTransportMessageUrgentFrame)):
+            if self.should_ignore_frame(frame):
+                return None
+            return json.dumps(frame.message)
 
         # Return None for unhandled frames
         return None
@@ -281,7 +291,7 @@ class TelnyxFrameSerializer(FrameSerializer):
 
             try:
                 return InputDTMFFrame(KeypadEntry(digit))
-            except ValueError as e:
+            except ValueError:
                 # Handle case where string doesn't match any enum value
                 return None
         else:

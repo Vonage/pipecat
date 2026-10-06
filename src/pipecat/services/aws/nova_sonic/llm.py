@@ -24,7 +24,10 @@ from typing import Any
 
 from loguru import logger
 from pydantic import BaseModel, Field
+from typing_extensions import override
 
+from pipecat.adapters.schemas.direct_function import DirectFunction
+from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.adapters.services.aws_nova_sonic_adapter import AWSNovaSonicLLMAdapter, Role
 from pipecat.frames.frames import (
@@ -39,8 +42,8 @@ from pipecat.frames.frames import (
     LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
+    LLMServiceMetadataFrame,
     LLMTextFrame,
-    StartFrame,
     TranscriptionFrame,
     TTSAudioRawFrame,
     TTSStartedFrame,
@@ -49,16 +52,19 @@ from pipecat.frames.frames import (
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
 )
+from pipecat.metrics.metrics import LLMTokenUsage
 from pipecat.processors.aggregators import async_tool_messages
 from pipecat.processors.aggregators.llm_context import LLMContext, LLMSpecificMessage
-from pipecat.processors.frame_processor import FrameDirection
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessorSetup
 from pipecat.services.aws.nova_sonic.session_continuation import (
     SessionContinuationHelper,
     SessionContinuationParams,
 )
 from pipecat.services.llm_service import LLMService
-from pipecat.services.settings import NOT_GIVEN, LLMSettings, _NotGiven, assert_given
+from pipecat.services.settings import LLMSettings
+from pipecat.utils.deprecation import deprecated
 from pipecat.utils.time import time_now_iso8601
+from pipecat.utils.types import NOT_GIVEN, NotGiven, assert_given
 
 try:
     from aws_sdk_bedrock_runtime.client import (
@@ -72,15 +78,15 @@ try:
         InvokeModelWithBidirectionalStreamInputChunk,
         InvokeModelWithBidirectionalStreamOperationOutput,
         InvokeModelWithBidirectionalStreamOutput,
+        InvokeModelWithBidirectionalStreamOutputChunk,
     )
     from smithy_aws_core.auth.sigv4 import SigV4AuthScheme
     from smithy_aws_core.identity.static import StaticCredentialsResolver
     from smithy_core.aio.eventstream import DuplexEventStream
+    from smithy_core.shapes import ShapeID
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
-    logger.error(
-        "In order to use AWS services, you need to `pip install pipecat-ai[aws-nova-sonic]`."
-    )
+    logger.error('In order to use AWS services, you need to `uv add "pipecat-ai[aws-nova-sonic]"`.')
     raise ImportError(f"Missing module: {e}") from e
 
 
@@ -123,14 +129,15 @@ class CurrentContent:
     Parameters:
         type: The type of content (audio, text, or tool).
         role: The role generating the content (user, assistant, etc.).
-        text_stage: The stage of text generation (final or speculative).
-        text_content: The actual text content if applicable.
+        text_stage: The stage of text generation (final or speculative), or None
+            for content that isn't text.
+        text_content: The text content, filled in as it arrives, or None until then.
     """
 
     type: ContentType
     role: Role
-    text_stage: TextStage  # None if not text
-    text_content: str  # starts as None, then fills in if text
+    text_stage: TextStage | None
+    text_content: str | None
 
     def __str__(self):
         """String representation of the current content."""
@@ -143,12 +150,17 @@ class CurrentContent:
         )
 
 
+@deprecated(
+    "`Params` is deprecated since 0.0.105 and will be removed in 2.0.0. Use "
+    "`AWSNovaSonicLLMService.Settings` instead."
+)
 class Params(BaseModel):
     """Configuration parameters for AWS Nova Sonic.
 
     .. deprecated:: 0.0.105
         Use ``settings=AWSNovaSonicLLMService.Settings(...)`` for inference settings
         and ``audio_config=AudioConfig(...)`` for audio configuration.
+        Will be removed in 2.0.0.
 
     Parameters:
         input_sample_rate: Audio input sample rate in Hz.
@@ -189,14 +201,21 @@ class Params(BaseModel):
     @property
     def audio_config(self) -> "AudioConfig":
         """Return an ``AudioConfig`` populated from this instance's audio fields."""
-        return AudioConfig(
-            input_sample_rate=self.input_sample_rate,
-            input_sample_size=self.input_sample_size,
-            input_channel_count=self.input_channel_count,
-            output_sample_rate=self.output_sample_rate,
-            output_sample_size=self.output_sample_size,
-            output_channel_count=self.output_channel_count,
-        )
+        # These params type their audio fields as optional; an unset one takes
+        # the AudioConfig default, which carries the same value.
+        given = {
+            field: value
+            for field in (
+                "input_sample_rate",
+                "input_sample_size",
+                "input_channel_count",
+                "output_sample_rate",
+                "output_sample_size",
+                "output_channel_count",
+            )
+            if (value := getattr(self, field)) is not None
+        }
+        return AudioConfig(**given)
 
 
 class AudioConfig(BaseModel):
@@ -212,14 +231,14 @@ class AudioConfig(BaseModel):
     """
 
     # Input
-    input_sample_rate: int | None = Field(default=16000)
-    input_sample_size: int | None = Field(default=16)
-    input_channel_count: int | None = Field(default=1)
+    input_sample_rate: int = Field(default=16000)
+    input_sample_size: int = Field(default=16)
+    input_channel_count: int = Field(default=1)
 
     # Output
-    output_sample_rate: int | None = Field(default=24000)
-    output_sample_size: int | None = Field(default=16)
-    output_channel_count: int | None = Field(default=1)
+    output_sample_rate: int = Field(default=24000)
+    output_sample_size: int = Field(default=16)
+    output_channel_count: int = Field(default=1)
 
 
 @dataclass
@@ -232,8 +251,8 @@ class AWSNovaSonicLLMSettings(LLMSettings):
             user has stopped speaking. Can be "LOW", "MEDIUM", or "HIGH".
     """
 
-    voice: str | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    endpointing_sensitivity: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    voice: str | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    endpointing_sensitivity: str | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
 
 
 class AWSNovaSonicLLMService(LLMService[AWSNovaSonicLLMAdapter]):
@@ -241,6 +260,17 @@ class AWSNovaSonicLLMService(LLMService[AWSNovaSonicLLMAdapter]):
 
     Provides bidirectional audio streaming, real-time transcription, text generation,
     and function calling capabilities using AWS Nova Sonic model.
+
+    Does NOT emit ``UserStartedSpeakingFrame`` / ``UserStoppedSpeakingFrame``,
+    so pipeline processors that depend on those frames — RTVI client
+    speech events, ``TurnTrackingObserver``, ``AudioBufferProcessor`` turn
+    recording, ``UserIdleController``, user mute strategies, voicemail
+    detector — won't activate with the default server-VAD-only setup.
+    ``LLMContextAggregatorPair`` auto-detects this realtime service so context
+    writes are correct anyway. To produce the turn frames
+    locally, wire ``vad_analyzer=SileroVADAnalyzer()`` (or similar) into
+    ``LLMUserAggregatorParams``; locally-generated turn boundaries are a
+    heuristic and may not match Nova Sonic's server-side turn decisions.
     """
 
     Settings = AWSNovaSonicLLMSettings
@@ -248,6 +278,11 @@ class AWSNovaSonicLLMService(LLMService[AWSNovaSonicLLMAdapter]):
 
     # Override the default adapter to use the AWSNovaSonicLLMAdapter one
     adapter_class = AWSNovaSonicLLMAdapter
+
+    def service_metadata_frame(self) -> LLMServiceMetadataFrame:
+        """Realtime service; emits no server-side turn frames, so recommends no external strategies."""
+        self._warn_if_realtime_service_emits_no_turn_frames(emits_turn_frames=False)
+        return LLMServiceMetadataFrame(service_name=self.name, is_realtime_service=True)
 
     def __init__(
         self,
@@ -262,7 +297,7 @@ class AWSNovaSonicLLMService(LLMService[AWSNovaSonicLLMAdapter]):
         audio_config: AudioConfig | None = None,
         settings: Settings | None = None,
         system_instruction: str | None = None,
-        tools: ToolsSchema | None = None,
+        tools: ToolsSchema | list[FunctionSchema | DirectFunction] | None = None,
         session_continuation: SessionContinuationParams | None = None,
         **kwargs,
     ):
@@ -274,12 +309,14 @@ class AWSNovaSonicLLMService(LLMService[AWSNovaSonicLLMAdapter]):
             session_token: AWS session token for authentication.
             region: AWS region where the service is hosted.
                 Supported regions:
-                - Nova 2 Sonic (the default model): "us-east-1", "us-west-2", "ap-northeast-1"
-                - Nova Sonic (the older model): "us-east-1", "ap-northeast-1"
+                - Nova 2 Sonic (the default model): "us-east-1", "us-west-2", "eu-north-1",
+                  "ap-northeast-1"
+                - Nova Sonic (the older model): "us-east-1", "eu-north-1", "ap-northeast-1"
             model: Model identifier. Defaults to "amazon.nova-2-sonic-v1:0".
 
                 .. deprecated:: 0.0.105
                     Use ``settings=AWSNovaSonicLLMService.Settings(model=...)`` instead.
+                    Will be removed in 2.0.0.
 
             voice_id: Voice ID for speech synthesis.
                 Note that some voices are designed for use with a specific language.
@@ -289,6 +326,7 @@ class AWSNovaSonicLLMService(LLMService[AWSNovaSonicLLMAdapter]):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=AWSNovaSonicLLMService.Settings(voice=...)`` instead.
+                    Will be removed in 2.0.0.
 
             params: Model parameters for audio configuration and inference.
 
@@ -296,6 +334,7 @@ class AWSNovaSonicLLMService(LLMService[AWSNovaSonicLLMAdapter]):
                     Use ``settings=AWSNovaSonicLLMService.Settings(...)`` for inference
                     settings and ``audio_config=AudioConfig(...)`` for audio
                     configuration.
+                    Will be removed in 2.0.0.
 
             audio_config: Audio configuration (sample rates, sample sizes,
                 channel counts). If not provided, defaults are used.
@@ -306,7 +345,11 @@ class AWSNovaSonicLLMService(LLMService[AWSNovaSonicLLMAdapter]):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=AWSNovaSonicLLMService.Settings(system_instruction=...)`` instead.
-            tools: Available tools/functions for the model to use.
+                    Will be removed in 2.0.0.
+
+            tools: Available tools for the model: a ``ToolsSchema`` or a plain list
+                of direct functions and/or ``FunctionSchema`` objects (handlers
+                auto-register).
             session_continuation: Configuration for automatic session continuation.
                 When enabled (the default), sessions are seamlessly rotated before
                 the AWS time limit (~8 minutes) with no user-perceptible interruption.
@@ -380,6 +423,11 @@ class AWSNovaSonicLLMService(LLMService[AWSNovaSonicLLMAdapter]):
         self._audio_config = audio_config or (
             params.audio_config if params is not None else AudioConfig()
         )
+        # Accept a plain list of standard tools as a convenience; normalize it to a
+        # ToolsSchema so the rest of the service has a single form to handle.
+        if isinstance(tools, list):
+            normalized = LLMContext._normalize_and_validate_tools(tools)
+            tools = normalized if isinstance(normalized, ToolsSchema) else None
         self._tools = tools
 
         # Validate endpointing_sensitivity parameter
@@ -461,13 +509,13 @@ class AWSNovaSonicLLMService(LLMService[AWSNovaSonicLLMAdapter]):
     # standard AIService frame handling
     #
 
-    async def start(self, frame: StartFrame):
-        """Start the service and initiate connection to AWS Nova Sonic.
+    async def setup(self, setup: FrameProcessorSetup):
+        """Set up the service.
 
         Args:
-            frame: The start frame triggering service initialization.
+            setup: Configuration object containing setup parameters.
         """
-        await super().start(frame)
+        await super().setup(setup)
         self._wants_connection = True
         await self._start_connecting()
 
@@ -478,8 +526,7 @@ class AWSNovaSonicLLMService(LLMService[AWSNovaSonicLLMAdapter]):
             frame: The end frame triggering service shutdown.
         """
         await super().stop(frame)
-        self._wants_connection = False
-        await self._disconnect()
+        await self._teardown()
 
     async def cancel(self, frame: CancelFrame):
         """Cancel the service and close connections.
@@ -488,8 +535,30 @@ class AWSNovaSonicLLMService(LLMService[AWSNovaSonicLLMAdapter]):
             frame: The cancel frame triggering service cancellation.
         """
         await super().cancel(frame)
+        await self._teardown()
+
+    async def cleanup(self):
+        """Release AWS Nova Sonic resources at teardown."""
+        await super().cleanup()
+        await self._teardown()
+
+    async def _teardown(self):
+        """Stop wanting a connection and disconnect (idempotent).
+
+        Shared by ``stop``/``cancel``/``cleanup``. Distinct from
+        :meth:`_disconnect`, which leaves ``_wants_connection`` untouched so
+        ``reset_conversation`` can disconnect and reconnect.
+        """
         self._wants_connection = False
         await self._disconnect()
+
+    def can_generate_metrics(self) -> bool:
+        """Check if the service can generate usage metrics.
+
+        Returns:
+            True if metrics generation is supported.
+        """
+        return True
 
     #
     # conversation resetting
@@ -522,6 +591,11 @@ class AWSNovaSonicLLMService(LLMService[AWSNovaSonicLLMAdapter]):
     #
     # frame processing
     #
+
+    @override
+    def _service_tools(self) -> "ToolsSchema | None":
+        """Return the tools configured via ``tools=`` at construction, if any."""
+        return self._tools
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         """Process incoming frames and handle service-specific logic.
@@ -819,7 +893,7 @@ class AWSNovaSonicLLMService(LLMService[AWSNovaSonicLLMAdapter]):
             aws_secret_access_key=self._secret_access_key,
             aws_session_token=self._session_token,
             aws_credentials_identity_resolver=StaticCredentialsResolver(),
-            auth_schemes={"aws.auth#sigv4": SigV4AuthScheme(service="bedrock")},
+            auth_schemes={ShapeID("aws.auth#sigv4"): SigV4AuthScheme(service="bedrock")},
         )
         return BedrockRuntimeClient(config=config)
 
@@ -859,7 +933,7 @@ class AWSNovaSonicLLMService(LLMService[AWSNovaSonicLLMAdapter]):
         await self.send_prompt_start(tools, self._prompt_name, self._stream)
 
     async def _send_audio_input_start_event(self):
-        if not self._prompt_name:
+        if not self._prompt_name or not self._input_audio_content_name:
             return
         await self.send_audio_input_start(
             self._prompt_name, self._input_audio_content_name, self._stream
@@ -881,7 +955,12 @@ class AWSNovaSonicLLMService(LLMService[AWSNovaSonicLLMAdapter]):
         await self.send_text(text, role.value, self._prompt_name, self._stream, interactive)
 
     async def _send_user_audio_event(self, audio: bytes):
-        if not self._stream or not self._audio_input_started:
+        if (
+            not self._stream
+            or not self._audio_input_started
+            or not self._prompt_name
+            or not self._input_audio_content_name
+        ):
             return
         await self.send_audio(
             audio, self._prompt_name, self._input_audio_content_name, self._stream
@@ -1261,6 +1340,16 @@ class AWSNovaSonicLLMService(LLMService[AWSNovaSonicLLMAdapter]):
                 if stream is not self._stream:
                     return
 
+                if result is None:
+                    # The service has no more events to send. Our own disconnect
+                    # and a session-continuation handoff are both handled above,
+                    # so reaching here means the stream ended while we still
+                    # wanted it: reconnect via the handler below.
+                    raise RuntimeError("AWS Bedrock ended the response stream")
+
+                if not isinstance(result, InvokeModelWithBidirectionalStreamOutputChunk):
+                    raise RuntimeError(f"AWS Bedrock stream reported: {result}")
+
                 if result.value and result.value.bytes_:
                     response_data = result.value.bytes_.decode("utf-8")
                     json_data = json.loads(response_data)
@@ -1288,6 +1377,9 @@ class AWSNovaSonicLLMService(LLMService[AWSNovaSonicLLMAdapter]):
                         elif "completionEnd" in event_json:
                             # Handle the LLM completion ending
                             await self._handle_completion_end_event(event_json)
+                        elif "usageEvent" in event_json:
+                            # Handle token usage reporting
+                            await self._handle_usage_event(event_json)
         except Exception as e:
             if self._disconnecting:
                 return
@@ -1428,9 +1520,15 @@ class AWSNovaSonicLLMService(LLMService[AWSNovaSonicLLMAdapter]):
                         if self._sc.on_content_end_assistant_final_text(content.text_content):
                             self.create_task(self._run_sc_handoff(), name="sc_handoff")
                 else:
+                    # FINAL TEXT INTERRUPTED is the canonical barge-in
+                    # signal. The AUDIO branch usually closed the
+                    # response already (AUDIO contentEnd arrives with
+                    # END_TURN on barge-in, before this), but the
+                    # output transport's audio buffer is still draining
+                    # — broadcast unconditionally to clear it.
+                    await self.broadcast_interruption()
                     if self._assistant_is_responding:
-                        # TEXT INTERRUPTED before audio started means no AUDIO
-                        # contentEnd will arrive — end the response here.
+                        # No AUDIO contentEnd will arrive — close here.
                         self._assistant_is_responding = False
                         await self._report_assistant_response_ended()
                     # Session continuation: TEXT INTERRUPTED is a completion
@@ -1443,6 +1541,18 @@ class AWSNovaSonicLLMService(LLMService[AWSNovaSonicLLMAdapter]):
                 if stop_reason in ("END_TURN", "INTERRUPTED"):
                     # END_TURN: normal completion. INTERRUPTED: user interrupted
                     # mid-audio. Both mean no more audio for this turn.
+                    if stop_reason == "INTERRUPTED":
+                        # Emit InterruptionFrame upstream so the assistant
+                        # aggregator marks the message interrupted=True, and
+                        # downstream so BaseOutputTransport clears the audio
+                        # buffer (without this the bot keeps talking past the
+                        # interruption while the buffer drains, since Nova
+                        # Sonic doesn't surface server-side interruption any
+                        # other way). Must fire before
+                        # _report_assistant_response_ended so the aggregator
+                        # handles InterruptionFrame before LLMFullResponseEndFrame
+                        # closes the turn.
+                        await self.broadcast_interruption()
                     self._assistant_is_responding = False
                     await self._report_assistant_response_ended()
         elif content.role == Role.USER:
@@ -1457,6 +1567,28 @@ class AWSNovaSonicLLMService(LLMService[AWSNovaSonicLLMAdapter]):
         # Session continuation: completionEnd is a fallback completion signal
         if self._sc.on_completion_end():
             self.create_task(self._run_sc_handoff(), name="sc_handoff")
+
+    async def _handle_usage_event(self, event_json):
+        # Nova Sonic reports incremental token usage in details.delta, split into
+        # speech/text buckets for input and output. We report the delta (not the
+        # cumulative details.total) so usage stays incremental per event, matching
+        # the convention of the other speech-to-speech services. Pipecat's
+        # LLMTokenUsage does not separate modalities, so collapse speech + text
+        # into prompt/completion totals.
+        delta = event_json["usageEvent"].get("details", {}).get("delta", {})
+        input_tokens = delta.get("input", {})
+        output_tokens = delta.get("output", {})
+        prompt_tokens = input_tokens.get("speechTokens", 0) + input_tokens.get("textTokens", 0)
+        completion_tokens = output_tokens.get("speechTokens", 0) + output_tokens.get(
+            "textTokens", 0
+        )
+        if prompt_tokens or completion_tokens:
+            tokens = LLMTokenUsage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+            )
+            await self.start_llm_usage_metrics(tokens)
 
     #
     # assistant response reporting
@@ -1550,7 +1682,7 @@ class AWSNovaSonicLLMService(LLMService[AWSNovaSonicLLMAdapter]):
         if not self._user_text_buffer:
             return
 
-        logger.debug(f"User transcription ended")
+        logger.debug("User transcription ended")
 
         # Report to the upstream user context aggregator that some new user
         # transcription text is available.

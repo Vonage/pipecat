@@ -23,12 +23,14 @@ from pipecat.frames.frames import (
     TTSAudioRawFrame,
     TTSStoppedFrame,
 )
-from pipecat.processors.frame_processor import FrameDirection
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessorSetup
 from pipecat.services.azure.common import language_to_azure_language
-from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven, assert_given
+from pipecat.services.settings import TTSSettings
 from pipecat.services.tts_service import TextAggregationMode, TTSService
 from pipecat.transcriptions.language import Language
+from pipecat.utils.deprecation import deprecated
 from pipecat.utils.tracing.service_decorators import traced_tts
+from pipecat.utils.types import NOT_GIVEN, NotGiven, assert_given
 
 try:
     from azure.cognitiveservices.speech import (
@@ -41,7 +43,7 @@ try:
     )
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
-    logger.error("In order to use Azure, you need to `pip install pipecat-ai[azure]`.")
+    logger.error('In order to use Azure, you need to `uv add "pipecat-ai[azure]"`.')
     raise ImportError(f"Missing module: {e}") from e
 
 
@@ -71,22 +73,44 @@ class AzureTTSSettings(TTSSettings):
     """Settings for AzureTTSService and AzureHttpTTSService.
 
     Parameters:
+        effect: Audio effect processor that compensates for playback distortion on
+            a target device, as SSML's ``effect`` attribute on ``<voice>``:
+            ``"eq_car"`` for enclosed vehicles, ``"eq_telecomhp8k"`` for narrowband
+            telephony (pair it with an 8 kHz pipeline, or the output is not
+            optimized). Azure ignores an unrecognized value.
         emphasis: Emphasis level for speech ("strong", "moderate", "reduced").
+        force_locale: Wrap synthesized text in SSML's ``<lang xml:lang>`` so the
+            voice speaks in the configured ``language`` rather than the one it
+            auto-detects from the text. Multilingual voices (e.g.
+            ``en-US-EmmaMultilingualNeural``) use this to pin an accent; standard,
+            single-locale voices ignore the element. Enabling it also disables
+            per-segment language switching, so mixed-language text is spoken
+            entirely in the configured locale. A multilingual voice synthesizes
+            no audio at all for a locale outside the set it speaks, so pair this
+            with a ``language`` the voice supports. Defaults to ``False``.
         pitch: Voice pitch adjustment (e.g., "+10%", "-5Hz", "high").
         rate: Speech rate adjustment (e.g., "1.0", "1.25", "slow", "fast").
         role: Voice role for expression (e.g., "YoungAdultFemale").
         style: Speaking style (e.g., "cheerful", "sad", "excited").
         style_degree: Intensity of the speaking style (0.01 to 2.0).
+        voice_parameters: Model parameters for HD voices, as SSML's
+            semicolon-separated ``parameters`` attribute on ``<voice>`` (e.g.
+            ``"temperature=0.7;top_p=0.8;top_k=22;cfg_scale=1.4"``, or
+            ``"enhancePronunciation=true"``). Which keys apply depends on the
+            voice's base model; standard neural voices ignore the attribute.
         volume: Volume level (e.g., "+20%", "loud", "x-soft").
     """
 
-    emphasis: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    pitch: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    rate: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    role: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    style: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    style_degree: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    volume: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    effect: str | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    emphasis: str | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    force_locale: bool | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    pitch: str | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    rate: str | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    role: str | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    style: str | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    style_degree: str | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    voice_parameters: str | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    volume: str | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
 
 
 class AzureBaseTTSService:
@@ -110,11 +134,16 @@ class AzureBaseTTSService:
         "'": "&apos;",
     }
 
+    @deprecated(
+        "`AzureBaseTTSService.InputParams` is deprecated since 0.0.105 and will be removed in "
+        "2.0.0. Use `AzureBaseTTSService.Settings` instead."
+    )
     class InputParams(BaseModel):
         """Input parameters for Azure TTS voice configuration.
 
         .. deprecated:: 0.0.105
             Use ``settings=AzureBaseTTSService.Settings(...)`` instead.
+            Will be removed in 2.0.0.
 
         Parameters:
             emphasis: Emphasis level for speech ("strong", "moderate", "reduced").
@@ -140,7 +169,8 @@ class AzureBaseTTSService:
         self,
         *,
         api_key: str,
-        region: str,
+        region: str | None = None,
+        private_endpoint: str | None = None,
     ):
         """Initialize Azure-specific configuration.
 
@@ -149,9 +179,14 @@ class AzureBaseTTSService:
         Args:
             api_key: Azure Cognitive Services subscription key.
             region: Azure region identifier (e.g., "eastus", "westus2").
+                Required unless ``private_endpoint`` is provided.
+            private_endpoint: Custom endpoint URL for Azure Speech Services
+                (e.g., "https://my-resource.cognitiveservices.azure.com/"). Use
+                this when connecting via Private Link or a custom domain.
         """
         self._api_key = api_key
         self._region = region
+        self._private_endpoint = private_endpoint
         self._speech_synthesizer = None
 
     def language_to_service_language(self, language: Language) -> str | None:
@@ -171,13 +206,22 @@ class AzureBaseTTSService:
         # Escape special characters
         escaped_text = self._escape_text(text)
 
+        voice_attrs = f"name='{self._settings.voice}'"
+        if self._settings.effect:
+            voice_attrs += f" effect='{self._settings.effect}'"
+        if self._settings.voice_parameters:
+            voice_attrs += f" parameters='{self._settings.voice_parameters}'"
+
         ssml = (
             f"<speak version='1.0' xml:lang='{language}' "
             "xmlns='http://www.w3.org/2001/10/synthesis' "
             "xmlns:mstts='http://www.w3.org/2001/mstts'>"
-            f"<voice name='{self._settings.voice}'>"
+            f"<voice {voice_attrs}>"
             "<mstts:silence type='Sentenceboundary' value='20ms' />"
         )
+
+        if self._settings.force_locale:
+            ssml += f"<lang xml:lang='{language}'>"
 
         if self._settings.style:
             ssml += f"<mstts:express-as style='{self._settings.style}'"
@@ -212,6 +256,9 @@ class AzureBaseTTSService:
 
         if self._settings.style:
             ssml += "</mstts:express-as>"
+
+        if self._settings.force_locale:
+            ssml += "</lang>"
 
         ssml += "</voice></speak>"
 
@@ -253,7 +300,8 @@ class AzureTTSService(TTSService, AzureBaseTTSService):
         self,
         *,
         api_key: str,
-        region: str,
+        region: str | None = None,
+        private_endpoint: str | None = None,
         voice: str | None = None,
         sample_rate: int | None = None,
         params: AzureBaseTTSService.InputParams | None = None,
@@ -267,16 +315,23 @@ class AzureTTSService(TTSService, AzureBaseTTSService):
         Args:
             api_key: Azure Cognitive Services subscription key.
             region: Azure region identifier (e.g., "eastus", "westus2").
+                Required unless ``private_endpoint`` is provided.
+            private_endpoint: Custom endpoint URL for Azure Speech Services
+                (e.g., "https://my-resource.cognitiveservices.azure.com/"). Use
+                this when connecting via Private Link or a custom domain. See
+                https://learn.microsoft.com/en-us/azure/ai-services/speech-service/speech-services-private-link
             voice: Voice name to use for synthesis.
 
                 .. deprecated:: 0.0.105
                     Use ``settings=AzureTTSService.Settings(voice=...)`` instead.
+                    Will be removed in 2.0.0.
 
             sample_rate: Audio sample rate in Hz. If None, uses service default.
             params: Voice and synthesis parameters configuration.
 
                 .. deprecated:: 0.0.105
                     Use ``settings=AzureTTSService.Settings(...)`` instead.
+                    Will be removed in 2.0.0.
 
             settings: Runtime-updatable settings. When provided alongside deprecated
                 parameters, ``settings`` values take precedence.
@@ -284,6 +339,7 @@ class AzureTTSService(TTSService, AzureBaseTTSService):
 
                 .. deprecated:: 0.0.104
                     Use ``text_aggregation_mode`` instead.
+                    Will be removed in 2.0.0.
 
             text_aggregation_mode: How to aggregate text before synthesis.
             **kwargs: Additional arguments passed to parent WordTTSService.
@@ -294,11 +350,13 @@ class AzureTTSService(TTSService, AzureBaseTTSService):
             voice="en-US-SaraNeural",
             language="en-US",
             emphasis=None,
+            force_locale=False,
             pitch=None,
             rate=None,
             role=None,
             style=None,
             style_degree=None,
+            voice_parameters=None,
             volume=None,
         )
 
@@ -336,8 +394,15 @@ class AzureTTSService(TTSService, AzureBaseTTSService):
             **kwargs,
         )
 
+        if not region and not private_endpoint:
+            raise ValueError("Either 'region' or 'private_endpoint' must be provided.")
+        if region and private_endpoint:
+            logger.warning(
+                "Both 'region' and 'private_endpoint' provided; 'region' will be ignored."
+            )
+
         # Initialize Azure-specific functionality from mixin
-        self._init_azure_base(api_key=api_key, region=region)
+        self._init_azure_base(api_key=api_key, region=region, private_endpoint=private_endpoint)
 
         self._speech_config = None
         self._speech_synthesizer = None
@@ -362,23 +427,27 @@ class AzureTTSService(TTSService, AzureBaseTTSService):
         """
         return True
 
-    async def start(self, frame: StartFrame):
-        """Start the Azure TTS service and initialize speech synthesizer.
+    async def setup(self, setup: FrameProcessorSetup):
+        """Set up the service.
 
         Args:
-            frame: Start frame containing initialization parameters.
+            setup: Configuration object containing setup parameters.
         """
-        await super().start(frame)
-
-        if self._speech_config:
-            return
-
+        await super().setup(setup)
         # Now self.sample_rate is properly initialized
-        self._speech_config = SpeechConfig(
-            subscription=self._api_key,
-            region=self._region,
-        )
-        self._speech_config.speech_synthesis_language = self._settings.language
+        if self._private_endpoint:
+            self._speech_config = SpeechConfig(
+                subscription=self._api_key,
+                endpoint=self._private_endpoint,
+            )
+        else:
+            self._speech_config = SpeechConfig(
+                subscription=self._api_key,
+                region=self._region,
+            )
+        language = assert_given(self._settings.language)
+        if language:
+            self._speech_config.speech_synthesis_language = language
         self._speech_config.set_speech_synthesis_output_format(
             sample_rate_to_output_format(self.sample_rate)
         )
@@ -398,6 +467,14 @@ class AzureTTSService(TTSService, AzureBaseTTSService):
         self._speech_synthesizer.synthesis_canceled.connect(self._handle_canceled)
         self._speech_synthesizer.synthesis_word_boundary.connect(self._handle_word_boundary)
 
+    async def start(self, frame: StartFrame):
+        """Start the Azure TTS service and initialize speech synthesizer.
+
+        Args:
+            frame: Start frame containing initialization parameters.
+        """
+        await super().start(frame)
+
         # Start word processor task
         if not self._word_processor_task:
             self._word_processor_task = self.create_task(self._word_processor_task_handler())
@@ -409,8 +486,7 @@ class AzureTTSService(TTSService, AzureBaseTTSService):
             frame: End frame signaling service stop.
         """
         await super().stop(frame)
-        await self.cancel_task(self._word_processor_task)
-        self._word_processor_task = None
+        await self._stop_tasks()
 
     async def cancel(self, frame: CancelFrame):
         """Cancel the Azure TTS service.
@@ -419,8 +495,18 @@ class AzureTTSService(TTSService, AzureBaseTTSService):
             frame: Cancel frame signaling service cancellation.
         """
         await super().cancel(frame)
-        await self.cancel_task(self._word_processor_task)
-        self._word_processor_task = None
+        await self._stop_tasks()
+
+    async def cleanup(self):
+        """Clean up the Azure TTS service."""
+        await super().cleanup()
+        await self._stop_tasks()
+
+    async def _stop_tasks(self):
+        """Cancel the word processor task. Idempotent."""
+        if self._word_processor_task:
+            await self.cancel_task(self._word_processor_task)
+            self._word_processor_task = None
 
     def _is_cjk_language(self) -> bool:
         """Check if the configured language is CJK (Chinese, Japanese, Korean).
@@ -441,7 +527,7 @@ class AzureTTSService(TTSService, AzureBaseTTSService):
         Returns:
             True if text is only punctuation/whitespace, False otherwise.
         """
-        return text and all(not c.isalnum() for c in text)
+        return bool(text) and all(not c.isalnum() for c in text)
 
     def _handle_word_boundary(self, evt):
         """Handle word boundary events from Azure SDK.
@@ -481,7 +567,10 @@ class AzureTTSService(TTSService, AzureBaseTTSService):
     def _emit_pending_word(self):
         """Emit the currently buffered word if one exists."""
         if self._last_word is not None:
-            self._word_boundary_queue.put_nowait((self._last_word, self._last_timestamp))
+            asyncio.run_coroutine_threadsafe(
+                self._word_boundary_queue.put((self._last_word, self._last_timestamp)),
+                self.get_event_loop(),
+            )
             self._last_word = None
             self._last_timestamp = None
 
@@ -535,7 +624,10 @@ class AzureTTSService(TTSService, AzureBaseTTSService):
 
         # Regular word: emit previous, store current
         if self._last_word is not None:
-            self._word_boundary_queue.put_nowait((self._last_word, self._last_timestamp))
+            asyncio.run_coroutine_threadsafe(
+                self._word_boundary_queue.put((self._last_word, self._last_timestamp)),
+                self.get_event_loop(),
+            )
         self._last_word = word
         self._last_timestamp = timestamp
 
@@ -572,7 +664,9 @@ class AzureTTSService(TTSService, AzureBaseTTSService):
             evt: Synthesis event containing audio data.
         """
         if evt.result and evt.result.audio_data:
-            self._audio_queue.put_nowait(evt.result.audio_data)
+            asyncio.run_coroutine_threadsafe(
+                self._audio_queue.put(evt.result.audio_data), self.get_event_loop()
+            )
 
     def _handle_completed(self, evt):
         """Handle synthesis completion.
@@ -586,7 +680,10 @@ class AzureTTSService(TTSService, AzureBaseTTSService):
 
         # Flush any pending word before completing
         if self._last_word is not None:
-            self._word_boundary_queue.put_nowait((self._last_word, self._last_timestamp))
+            asyncio.run_coroutine_threadsafe(
+                self._word_boundary_queue.put((self._last_word, self._last_timestamp)),
+                self.get_event_loop(),
+            )
             self._last_word = None
             self._last_timestamp = None
 
@@ -594,7 +691,7 @@ class AzureTTSService(TTSService, AzureBaseTTSService):
         # task drains all pending words before signaling audio stream completion.
         # Without this, the last word's TTSTextFrame may arrive after
         # TTSStoppedFrame, causing it to be missed by observers and the UI.
-        self._word_boundary_queue.put_nowait(None)
+        asyncio.run_coroutine_threadsafe(self._word_boundary_queue.put(None), self.get_event_loop())
 
     def _handle_canceled(self, evt):
         """Handle synthesis cancellation.
@@ -606,13 +703,15 @@ class AzureTTSService(TTSService, AzureBaseTTSService):
         # User cancellation (from interruption) is expected, not an error
         if reason == CancellationReason.CancelledByUser:
             logger.debug(f"{self}: Speech synthesis canceled by user (interruption)")
-            self._audio_queue.put_nowait(None)
+            asyncio.run_coroutine_threadsafe(self._audio_queue.put(None), self.get_event_loop())
         else:
             details = evt.result.cancellation_details
             error_msg = f"Azure TTS synthesis canceled: {reason}"
             if details.error_details:
                 error_msg += f" - {details.error_details}"
-            self._audio_queue.put_nowait(Exception(error_msg))
+            asyncio.run_coroutine_threadsafe(
+                self._audio_queue.put(Exception(error_msg)), self.get_event_loop()
+            )
 
     async def push_frame(self, frame: Frame, direction: FrameDirection = FrameDirection.DOWNSTREAM):
         """Push a frame and handle state changes.
@@ -687,8 +786,6 @@ class AzureTTSService(TTSService, AzureBaseTTSService):
         Yields:
             Frame: Audio frames containing synthesized speech data.
         """
-        logger.debug(f"{self}: Generating TTS [{text}]")
-
         # Clear the audio queue in case there's still audio in it, causing the next audio response
         # to be cut off by the 'None' element returned at the end of the previous audio synthesis.
         # Empty the audio queue before processing the new text
@@ -765,7 +862,8 @@ class AzureHttpTTSService(TTSService, AzureBaseTTSService):
         self,
         *,
         api_key: str,
-        region: str,
+        region: str | None = None,
+        private_endpoint: str | None = None,
         voice: str | None = None,
         sample_rate: int | None = None,
         params: AzureBaseTTSService.InputParams | None = None,
@@ -777,16 +875,23 @@ class AzureHttpTTSService(TTSService, AzureBaseTTSService):
         Args:
             api_key: Azure Cognitive Services subscription key.
             region: Azure region identifier (e.g., "eastus", "westus2").
+                Required unless ``private_endpoint`` is provided.
+            private_endpoint: Custom endpoint URL for Azure Speech Services
+                (e.g., "https://my-resource.cognitiveservices.azure.com/"). Use
+                this when connecting via Private Link or a custom domain. See
+                https://learn.microsoft.com/en-us/azure/ai-services/speech-service/speech-services-private-link
             voice: Voice name to use for synthesis.
 
                 .. deprecated:: 0.0.105
                     Use ``settings=AzureHttpTTSService.Settings(voice=...)`` instead.
+                    Will be removed in 2.0.0.
 
             sample_rate: Audio sample rate in Hz. If None, uses service default.
             params: Voice and synthesis parameters configuration.
 
                 .. deprecated:: 0.0.105
                     Use ``settings=AzureHttpTTSService.Settings(...)`` instead.
+                    Will be removed in 2.0.0.
 
             settings: Runtime-updatable settings. When provided alongside deprecated
                 parameters, ``settings`` values take precedence.
@@ -798,11 +903,13 @@ class AzureHttpTTSService(TTSService, AzureBaseTTSService):
             voice="en-US-SaraNeural",
             language="en-US",
             emphasis=None,
+            force_locale=False,
             pitch=None,
             rate=None,
             role=None,
             style=None,
             style_degree=None,
+            voice_parameters=None,
             volume=None,
         )
 
@@ -836,8 +943,15 @@ class AzureHttpTTSService(TTSService, AzureBaseTTSService):
             **kwargs,
         )
 
+        if not region and not private_endpoint:
+            raise ValueError("Either 'region' or 'private_endpoint' must be provided.")
+        if region and private_endpoint:
+            logger.warning(
+                "Both 'region' and 'private_endpoint' provided; 'region' will be ignored."
+            )
+
         # Initialize Azure-specific functionality from mixin
-        self._init_azure_base(api_key=api_key, region=region)
+        self._init_azure_base(api_key=api_key, region=region, private_endpoint=private_endpoint)
 
         self._speech_config = None
         self._speech_synthesizer = None
@@ -850,22 +964,27 @@ class AzureHttpTTSService(TTSService, AzureBaseTTSService):
         """
         return True
 
-    async def start(self, frame: StartFrame):
-        """Start the Azure HTTP TTS service and initialize speech synthesizer.
+    async def setup(self, setup: FrameProcessorSetup):
+        """Set up the service.
 
         Args:
-            frame: Start frame containing initialization parameters.
+            setup: Configuration object containing setup parameters.
         """
-        await super().start(frame)
+        await super().setup(setup)
 
-        if self._speech_config:
-            return
-
-        self._speech_config = SpeechConfig(
-            subscription=self._api_key,
-            region=self._region,
-        )
-        self._speech_config.speech_synthesis_language = self._settings.language
+        if self._private_endpoint:
+            self._speech_config = SpeechConfig(
+                subscription=self._api_key,
+                endpoint=self._private_endpoint,
+            )
+        else:
+            self._speech_config = SpeechConfig(
+                subscription=self._api_key,
+                region=self._region,
+            )
+        language = assert_given(self._settings.language)
+        if language:
+            self._speech_config.speech_synthesis_language = language
         self._speech_config.set_speech_synthesis_output_format(
             sample_rate_to_output_format(self.sample_rate)
         )
@@ -884,7 +1003,8 @@ class AzureHttpTTSService(TTSService, AzureBaseTTSService):
         Yields:
             Frame: Audio frames containing the complete synthesized speech.
         """
-        logger.debug(f"{self}: Generating TTS [{text}]")
+        if self._speech_synthesizer is None:
+            return
 
         ssml = self._construct_ssml(text)
 

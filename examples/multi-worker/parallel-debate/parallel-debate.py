@@ -31,12 +31,13 @@ import os
 from dotenv import load_dotenv
 from loguru import logger
 
-from pipecat.adapters.schemas.tools_schema import ToolsSchema
+from pipecat.adapters.schemas.direct_function import tool_options
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.bus import BusJobRequestMessage
+from pipecat.evals.transport import EvalTransportParams
 from pipecat.frames.frames import LLMMessagesAppendFrame, LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.worker import PipelineParams, PipelineWorker
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker, ProcessorUnusablePolicy
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     AssistantTurnStoppedMessage,
@@ -73,6 +74,10 @@ ROLE_PROMPTS = {
 }
 
 transport_params = {
+    "eval": lambda: EvalTransportParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+    ),
     "daily": lambda: DailyParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
@@ -129,6 +134,7 @@ class DebateWorker(LLMContextWorker):
         )
 
 
+@tool_options(cancel_on_interruption=False, timeout_secs=60)
 async def debate(params: FunctionCallParams, topic: str):
     """Analyze a topic from multiple perspectives (advocate, critic, analyst).
 
@@ -147,8 +153,6 @@ async def debate(params: FunctionCallParams, topic: str):
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     logger.info("Starting parallel-debate bot")
-
-    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
 
     stt = DeepgramSTTService(api_key=os.environ["DEEPGRAM_API_KEY"])
     tts = CartesiaTTSService(
@@ -169,9 +173,8 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             ),
         ),
     )
-    llm.register_direct_function(debate, cancel_on_interruption=False, timeout_secs=60)
 
-    context = LLMContext(tools=ToolsSchema(standard_tools=[debate]))
+    context = LLMContext(tools=[debate])
     aggregators = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
@@ -197,6 +200,16 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             enable_usage_metrics=True,
         ),
         idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
+        processor_unusable_policy=ProcessorUnusablePolicy.END,
+    )
+
+    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
+
+    await runner.add_workers(
+        DebateWorker("advocate"),
+        DebateWorker("critic"),
+        DebateWorker("analyst"),
+        worker,
     )
 
     @transport.event_handler("on_client_connected")
@@ -217,13 +230,6 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     async def on_client_disconnected(transport, client):
         logger.info("Client disconnected")
         await runner.cancel()
-
-    await runner.add_workers(
-        DebateWorker("advocate"),
-        DebateWorker("critic"),
-        DebateWorker("analyst"),
-        worker,
-    )
 
     await runner.run()
 

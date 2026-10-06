@@ -20,12 +20,11 @@ import os
 from dotenv import load_dotenv
 from loguru import logger
 
-from pipecat.adapters.schemas.function_schema import FunctionSchema
-from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.evals.transport import EvalTransportParams
 from pipecat.frames.frames import LLMRunFrame, LLMSummarizeContextFrame
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.worker import PipelineParams, PipelineWorker
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker, ProcessorUnusablePolicy
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
@@ -47,6 +46,10 @@ load_dotenv(override=True)
 # We use lambdas to defer transport parameter creation until the transport
 # type is selected at runtime.
 transport_params = {
+    "eval": lambda: EvalTransportParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+    ),
     "daily": lambda: DailyParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
@@ -63,7 +66,7 @@ transport_params = {
 
 
 async def summarize_conversation(params: FunctionCallParams):
-    """Trigger manual context summarization via a pipeline frame."""
+    """Summarize and compress the conversation history. Call this when the user asks you to summarize the conversation or when you want to free up context space."""
     logger.info("Tool called: summarize_conversation")
     await params.result_callback({"status": "summarization_requested"})
     await params.llm.queue_frame(LLMSummarizeContextFrame())
@@ -77,7 +80,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     tts = CartesiaTTSService(
         api_key=os.environ["CARTESIA_API_KEY"],
         settings=CartesiaTTSService.Settings(
-            voice="71a7ad14-091c-4e8e-a314-022ece01c121",  # British Reading Lady
+            voice="86e30c1d-714b-4074-a1f2-1cb6b552fb49",
         ),
     )
 
@@ -97,21 +100,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         ),
     )
 
-    llm.register_function("summarize_conversation", summarize_conversation)
-
-    summarize_function = FunctionSchema(
-        name="summarize_conversation",
-        description=(
-            "Summarize and compress the conversation history. "
-            "Call this when the user asks you to summarize the conversation "
-            "or when you want to free up context space."
-        ),
-        properties={},
-        required=[],
-    )
-    tools = ToolsSchema(standard_tools=[summarize_function])
-
-    context = LLMContext(tools=tools)
+    context = LLMContext(tools=[summarize_conversation])
 
     # Automatic summarization is NOT enabled here (enable_auto_context_summarization
     # defaults to False). The summarizer is still created internally so that
@@ -140,7 +129,12 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             enable_usage_metrics=True,
         ),
         idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
+        processor_unusable_policy=ProcessorUnusablePolicy.END,
     )
+
+    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
+
+    await runner.add_workers(worker)
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
@@ -154,11 +148,8 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
         logger.info("Client disconnected")
-        await worker.cancel()
+        await runner.cancel()
 
-    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
-
-    await runner.add_workers(worker)
     await runner.run()
 
 

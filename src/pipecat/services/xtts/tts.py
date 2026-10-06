@@ -8,6 +8,11 @@
 
 This module provides integration with Coqui XTTS streaming server for
 text-to-speech synthesis using local Docker deployment.
+
+.. deprecated:: 1.7.0
+    No replacement. :class:`~pipecat.services.kokoro.tts.KokoroTTSService` and
+    :class:`~pipecat.services.piper.tts.PiperTTSService` are the maintained
+    local TTS services. Will be removed in 2.0.0.
 """
 
 from collections.abc import AsyncGenerator
@@ -24,10 +29,12 @@ from pipecat.frames.frames import (
     StartFrame,
     TTSAudioRawFrame,
 )
-from pipecat.services.settings import TTSSettings, assert_given
+from pipecat.services.settings import TTSSettings
 from pipecat.services.tts_service import TTSService
 from pipecat.transcriptions.language import Language, resolve_language
+from pipecat.utils.deprecation import deprecated
 from pipecat.utils.tracing.service_decorators import traced_tts
+from pipecat.utils.types import assert_given, require_given
 
 # The server below can connect to XTTS through a local running docker
 #
@@ -79,12 +86,21 @@ class XTTSTTSSettings(TTSSettings):
     pass
 
 
+@deprecated(
+    "`XTTSService` is deprecated since 1.7.0 and will be removed in 2.0.0. No replacement. "
+    "`KokoroTTSService` and `PiperTTSService` are the maintained local TTS services."
+)
 class XTTSService(TTSService):
     """Coqui XTTS text-to-speech service.
 
     Provides text-to-speech synthesis using a locally running Coqui XTTS
     streaming server. Supports multiple languages and voice cloning through
     studio speakers configuration.
+
+    .. deprecated:: 1.7.0
+        No replacement. :class:`~pipecat.services.kokoro.tts.KokoroTTSService` and
+        :class:`~pipecat.services.piper.tts.PiperTTSService` are the maintained
+        local TTS services. Will be removed in 2.0.0.
     """
 
     Settings = XTTSTTSSettings
@@ -108,6 +124,7 @@ class XTTSService(TTSService):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=XTTSService.Settings(voice=...)`` instead.
+                    Will be removed in 2.0.0.
 
             base_url: Base URL of the XTTS streaming server.
             aiohttp_session: HTTP session for making requests to the server.
@@ -115,6 +132,7 @@ class XTTSService(TTSService):
 
                 .. deprecated:: 0.0.106
                     Use ``settings=XTTSService.Settings(language=...)`` instead.
+                    Will be removed in 2.0.0.
 
             sample_rate: Audio sample rate. If None, uses default.
             settings: Runtime-updatable settings. When provided alongside deprecated
@@ -149,6 +167,8 @@ class XTTSService(TTSService):
             settings=default_settings,
             **kwargs,
         )
+
+        require_given(self._settings.voice, "XTTS voice")
 
         # Init-only fields (not runtime-updatable)
         self._base_url = base_url
@@ -208,15 +228,13 @@ class XTTSService(TTSService):
         Yields:
             Frame: Audio frames containing the synthesized speech.
         """
-        logger.debug(f"{self}: Generating TTS [{text}]")
-
         if not self._studio_speakers:
             logger.error(f"{self} no studio speakers available")
             return
 
         voice = assert_given(self._settings.voice)
-        if voice is None:
-            yield ErrorFrame(error="XTTS voice must be specified")
+        if not voice or voice not in self._studio_speakers:
+            yield ErrorFrame(error=f"XTTS voice '{voice}' is not one of the studio speakers")
             return
         embeddings = self._studio_speakers[voice]
 

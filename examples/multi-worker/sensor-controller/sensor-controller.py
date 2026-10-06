@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
-"""Voice agent + sensor-controller worker, both as plain PipelineTasks.
+"""Voice agent + sensor-controller worker, both as plain PipelineWorkers.
 
 Two ``PipelineWorker`` instances run side by side:
 
@@ -53,12 +53,13 @@ from dotenv import load_dotenv
 from loguru import logger
 from sensor import SensorReader, SensorStats
 
-from pipecat.adapters.schemas.tools_schema import ToolsSchema
+from pipecat.adapters.schemas.direct_function import tool_options
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.bus import BusJobRequestMessage
+from pipecat.evals.transport import EvalTransportParams
 from pipecat.frames.frames import LLMMessagesAppendFrame, LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.worker import PipelineParams, PipelineWorker
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker, ProcessorUnusablePolicy
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     AssistantTurnStoppedMessage,
@@ -79,6 +80,10 @@ load_dotenv(override=True)
 
 
 transport_params = {
+    "eval": lambda: EvalTransportParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+    ),
     "daily": lambda: DailyParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
@@ -161,20 +166,13 @@ def build_sensor_controller() -> PipelineWorker:
             ),
         ),
     )
-    llm.register_direct_function(get_current_reading)
-    llm.register_direct_function(get_stats)
-    llm.register_direct_function(set_target_temperature)
-    llm.register_direct_function(set_response_rate)
-
     context = LLMContext(
-        tools=ToolsSchema(
-            standard_tools=[
-                get_current_reading,
-                get_stats,
-                set_target_temperature,
-                set_response_rate,
-            ]
-        )
+        tools=[
+            get_current_reading,
+            get_stats,
+            set_target_temperature,
+            set_response_rate,
+        ]
     )
     aggregators = LLMContextAggregatorPair(context)
 
@@ -188,7 +186,9 @@ def build_sensor_controller() -> PipelineWorker:
         ]
     )
 
-    worker = PipelineWorker(pipeline, name="sensor-controller")
+    worker = PipelineWorker(
+        pipeline, name="sensor-controller", processor_unusable_policy=ProcessorUnusablePolicy.END
+    )
 
     # The controller handles one job at a time (the LLM pipeline can only
     # run one turn at a time). ``state["job_id"]`` pairs the in-flight
@@ -196,7 +196,7 @@ def build_sensor_controller() -> PipelineWorker:
     state: dict[str, str | None] = {"job_id": None}
 
     @worker.event_handler("on_job_request")
-    async def on_request(_task, message: BusJobRequestMessage):
+    async def on_request(_worker, message: BusJobRequestMessage):
         question = message.payload["question"]
         logger.info(f"Controller: received question '{question}'")
         state["job_id"] = message.job_id
@@ -238,6 +238,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         ),
     )
 
+    @tool_options(timeout_secs=60)
     async def ask_controller(params: FunctionCallParams, question: str):
         """Ask the temperature sensor controller anything about the sensor.
 
@@ -266,9 +267,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             ),
         ),
     )
-    llm.register_direct_function(ask_controller, timeout_secs=60)
-
-    context = LLMContext(tools=ToolsSchema(standard_tools=[ask_controller]))
+    context = LLMContext(tools=[ask_controller])
     aggregators = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
@@ -294,9 +293,12 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             enable_usage_metrics=True,
         ),
         idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
+        processor_unusable_policy=ProcessorUnusablePolicy.END,
     )
 
     runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
+
+    await runner.add_workers(build_sensor_controller(), worker)
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
@@ -316,8 +318,6 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     async def on_client_disconnected(transport, client):
         logger.info("Client disconnected")
         await runner.cancel()
-
-    await runner.add_workers(build_sensor_controller(), worker)
 
     await runner.run()
 

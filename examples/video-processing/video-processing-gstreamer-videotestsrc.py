@@ -8,8 +8,9 @@
 from dotenv import load_dotenv
 from loguru import logger
 
+from pipecat.evals.transport import EvalTransportParams
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.worker import PipelineWorker
+from pipecat.pipeline.worker import PipelineWorker, ProcessorUnusablePolicy
 from pipecat.processors.gstreamer.pipeline_source import GStreamerPipelineSource
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
@@ -22,6 +23,10 @@ load_dotenv(override=True)
 # We use lambdas to defer transport parameter creation until the transport
 # type is selected at runtime.
 transport_params = {
+    "eval": lambda: EvalTransportParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+    ),
     "daily": lambda: DailyParams(
         video_out_enabled=True,
         video_out_is_live=True,
@@ -38,7 +43,7 @@ transport_params = {
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
-    logger.info(f"Starting bot with video test source")
+    logger.info("Starting bot with video test source")
 
     gst = GStreamerPipelineSource(
         pipeline='videotestsrc ! capsfilter caps="video/x-raw,width=1280,height=720,framerate=30/1"',
@@ -57,6 +62,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     worker = PipelineWorker(
         pipeline,
         idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
+        processor_unusable_policy=ProcessorUnusablePolicy.END,
     )
 
     runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)

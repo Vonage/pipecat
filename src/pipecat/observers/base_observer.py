@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from pipecat.frames.frames import Frame
 from pipecat.utils.base_object import BaseObject
+from pipecat.utils.deprecation import deprecated
 
 if TYPE_CHECKING:
     from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
@@ -67,6 +68,46 @@ class FramePushed:
     timestamp: int
 
 
+@dataclass
+class ProcessorSetUp:
+    """Event data for a processor having been set up.
+
+    Processors are set up concurrently and before any frame flows, so this is
+    what a timing observer measures the work a processor does to get ready by.
+    The times come from :func:`time.monotonic_ns`, since the pipeline clock
+    only starts once the pipeline does.
+
+    Parameters:
+        processor: The processor that was set up.
+        started_at_ns: When the processor's ``setup()`` began.
+        finished_at_ns: When the processor's ``setup()`` returned.
+    """
+
+    processor: "FrameProcessor"
+    started_at_ns: int
+    finished_at_ns: int
+
+
+@deprecated(
+    "`StartupWarmup` is deprecated since 1.12.0 and will be removed in 2.0.0. No replacement."
+)
+@dataclass
+class StartupWarmup:
+    """Event data for the framework having warmed its deferred imports.
+
+    .. deprecated:: 1.12.0
+        No replacement. Nothing warms deferred imports at startup, so this
+        event is never emitted. Will be removed in 2.0.0.
+
+    Parameters:
+        started_at_ns: When warming began.
+        finished_at_ns: When warming finished.
+    """
+
+    started_at_ns: int
+    finished_at_ns: int
+
+
 class BaseObserver(BaseObject):
     """Base class for pipeline frame observers.
 
@@ -97,6 +138,35 @@ class BaseObserver(BaseObject):
 
         Args:
             data: The event data containing details about the frame transfer.
+        """
+        pass
+
+    async def on_processor_setup(self, data: ProcessorSetUp):
+        """Handle the event when a processor has been set up.
+
+        A processor connects and does its other slow start-up work here, so
+        this is where that cost can be measured. Processors are set up
+        concurrently, so these arrive in the order they finish rather than in
+        pipeline order.
+
+        Args:
+            data: The event data containing details about the processor setup.
+        """
+        pass
+
+    @deprecated(
+        "`BaseObserver.on_startup_warmup` is deprecated since 1.12.0 and will be removed in "
+        "2.0.0. No replacement."
+    )
+    async def on_startup_warmup(self, data: StartupWarmup):
+        """Handle the event when the framework has warmed its deferred imports.
+
+        .. deprecated:: 1.12.0
+            No replacement. Nothing warms deferred imports at startup, so this
+            is never called. Will be removed in 2.0.0.
+
+        Args:
+            data: The event data containing details about the warming.
         """
         pass
 

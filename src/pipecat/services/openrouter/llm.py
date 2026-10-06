@@ -18,7 +18,7 @@ from loguru import logger
 from pipecat.adapters.services.open_ai_adapter import OpenAILLMInvocationParams
 from pipecat.services.openai.base_llm import BaseOpenAILLMService
 from pipecat.services.openai.llm import OpenAILLMService
-from pipecat.services.settings import assert_given
+from pipecat.utils.types import assert_given
 
 
 @dataclass
@@ -57,6 +57,7 @@ class OpenRouterLLMService(OpenAILLMService):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=OpenRouterLLMService.Settings(model=...)`` instead.
+                    Will be removed in 2.0.0.
 
             base_url: The base URL for OpenRouter API. Defaults to "https://openrouter.ai/api/v1".
             settings: Runtime-updatable settings. When provided alongside deprecated

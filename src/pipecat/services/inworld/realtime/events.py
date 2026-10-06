@@ -12,11 +12,17 @@ https://docs.inworld.ai/api-reference/realtimeAPI/realtime/realtime-websocket
 
 import json
 import uuid
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from pipecat.adapters.schemas.direct_function import DirectFunction
+from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
+from pipecat.processors.aggregators.llm_context import LLMContext
+
+Modality: TypeAlias = Literal["text", "audio"]
+"""A modality the model can respond with."""
 
 #
 # Audio format configuration
@@ -180,7 +186,7 @@ class SessionProperties(BaseModel):
 
     Parameters:
         type: Session type, always "realtime".
-        model: The LLM model to use (e.g. "openai/gpt-4.1-nano").
+        model: The LLM model to use (e.g. "openai/gpt-4.1-mini").
         instructions: System instructions for the assistant.
         output_modalities: Output modalities (e.g. ["audio", "text"]).
         audio: Audio configuration including input (transcription, turn detection)
@@ -195,11 +201,25 @@ class SessionProperties(BaseModel):
     model: str | None = None
     instructions: str | None = None
     temperature: float | None = None
-    output_modalities: list[str] | None = None
+    output_modalities: list[Modality] | None = None
     audio: AudioConfiguration | None = None
-    # Tools can be ToolsSchema when provided by user, or list of dicts for API
-    tools: ToolsSchema | list[InworldTool] | None = None
+    # Tools provided by the user may be a ToolsSchema or a plain list of standard
+    # tools (the validator below normalizes that to a ToolsSchema); a list of
+    # provider-native InworldTool objects passes through.
+    tools: ToolsSchema | list[FunctionSchema | DirectFunction] | list[InworldTool] | None = None
     provider_data: dict[str, Any] | None = None
+
+    @field_validator("tools", mode="before")
+    @classmethod
+    def _normalize_tools(cls, v):
+        """Wrap a plain list of standard tools in a ``ToolsSchema``.
+
+        Provider-native tool lists pass through unchanged.
+        """
+        if isinstance(v, list):
+            normalized = LLMContext._normalize_and_validate_tools(v, allow_provider_tools=True)
+            return normalized if isinstance(normalized, (ToolsSchema, list)) else None
+        return v
 
 
 #
@@ -270,7 +290,7 @@ class ResponseProperties(BaseModel):
         modalities: Output modalities for the response (text, audio, or both).
     """
 
-    modalities: list[Literal["text", "audio"]] | None = ["text", "audio"]
+    modalities: list[Modality] | None = ["text", "audio"]
 
 
 #
@@ -846,11 +866,12 @@ _server_event_types = {
 }
 
 
-def parse_server_event(data: str):
-    """Parse a server event from JSON string.
+def parse_server_event(data: str | bytes):
+    """Parse a server event from JSON.
 
     Args:
-        data: JSON string containing the server event.
+        data: JSON text containing the server event, as delivered by the
+            websocket.
 
     Returns:
         Parsed server event object of the appropriate type, or ``None`` if the

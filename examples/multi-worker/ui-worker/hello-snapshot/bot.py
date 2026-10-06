@@ -55,12 +55,13 @@ import os
 from dotenv import load_dotenv
 from loguru import logger
 
-from pipecat.adapters.schemas.tools_schema import ToolsSchema
+from pipecat.adapters.schemas.direct_function import tool_options
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.evals.transport import EvalTransportParams
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.job_context import JobError
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.worker import PipelineParams, PipelineWorker
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker, ProcessorUnusablePolicy
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
@@ -83,6 +84,10 @@ load_dotenv(override=True)
 MAIN_NAME = "main"
 
 transport_params = {
+    "eval": lambda: EvalTransportParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+    ),
     "daily": lambda: DailyParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
@@ -168,6 +173,7 @@ class HelloWorker(UIWorker):
         await params.result_callback(None)
 
 
+@tool_options(cancel_on_interruption=False, timeout_secs=60)
 async def answer_about_screen(params: FunctionCallParams, query: str):
     """Ask the screen-aware UI layer to answer about the current page.
 
@@ -191,22 +197,19 @@ async def answer_about_screen(params: FunctionCallParams, query: str):
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     logger.info("Starting hello-snapshot bot")
 
-    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
-
     stt = DeepgramSTTService(api_key=os.environ["DEEPGRAM_API_KEY"])
     tts = CartesiaTTSService(
         api_key=os.environ["CARTESIA_API_KEY"],
         settings=CartesiaTTSService.Settings(
-            voice=os.getenv("CARTESIA_VOICE_ID", "71a7ad14-091c-4e8e-a314-022ece01c121"),
+            voice=os.getenv("CARTESIA_VOICE_ID", "86e30c1d-714b-4074-a1f2-1cb6b552fb49"),
         ),
     )
     llm = OpenAILLMService(
         api_key=os.environ["OPENAI_API_KEY"],
         settings=OpenAILLMService.Settings(system_instruction=VOICE_PROMPT),
     )
-    llm.register_direct_function(answer_about_screen, cancel_on_interruption=False, timeout_secs=60)
 
-    context = LLMContext(tools=ToolsSchema(standard_tools=[answer_about_screen]))
+    context = LLMContext(tools=[answer_about_screen])
     aggregators = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
@@ -232,7 +235,12 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             enable_usage_metrics=True,
         ),
         idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
+        processor_unusable_policy=ProcessorUnusablePolicy.END,
     )
+
+    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
+
+    await runner.add_workers(HelloWorker(), worker)
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
@@ -252,8 +260,6 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     async def on_client_disconnected(transport, client):
         logger.info("Client disconnected")
         await runner.cancel()
-
-    await runner.add_workers(HelloWorker(), worker)
 
     await runner.run()
 
