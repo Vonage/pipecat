@@ -104,7 +104,7 @@ class VonageVideoConnectorTransportParams(TransportParams):
         session_enable_migration: Whether to enable session migration.
         audio_in_auto_subscribe: Whether to automatically subscribe to audio streams.
         audio_in_frame_source: Audio source frames to emit: individual, mixed, or both.
-            Defaults to both.
+            Defaults to mixed.
         video_in_auto_subscribe: Whether to automatically subscribe to video streams.
         captions_in_auto_subscribe: Whether to automatically subscribe to captions streams.
         video_in_preferred_width: Preferred width for video input capture.
@@ -118,7 +118,7 @@ class VonageVideoConnectorTransportParams(TransportParams):
     publisher_enable_opus_dtx: bool = False
     session_enable_migration: bool = False
     audio_in_auto_subscribe: bool = True
-    audio_in_frame_source: AudioInFrameSource = AudioInFrameSource.BOTH
+    audio_in_frame_source: AudioInFrameSource = AudioInFrameSource.MIXED
     video_in_auto_subscribe: bool = False
     video_connector_log_level: str = "INFO"
     video_in_preferred_resolution: tuple[int, int] | None = None

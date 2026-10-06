@@ -651,7 +651,7 @@ class TestVonageVideoConnectorTransport:
         )
         assert self._connect_callbacks is not None
         # the session mixed audio callback is only registered when mixed audio is wanted
-        # (audio enabled and, by default, both mode); otherwise it's left out
+        # (audio enabled and, by default, mixed mode); otherwise it's left out
         if has_audio:
             assert call_args[1]["on_audio_data_cb"] == client._on_session_audio_data_cb
         else:
@@ -1806,8 +1806,8 @@ class TestVonageVideoConnectorTransport:
             on_connected_cb=callbacks.on_connected_cb,
             on_disconnected_cb=callbacks.on_disconnected_cb,
             on_render_frame_cb=client._on_subscriber_video_data_cb,
+            # default mode is mixed, so the per-subscriber audio callback is not registered
             on_caption_text_cb=client._on_subscriber_caption_text_cb,
-            on_audio_data_cb=client._on_subscriber_audio_data_cb,
         )
         listener.on_stream_received.reset_mock()
 
@@ -2079,7 +2079,7 @@ class TestVonageVideoConnectorTransport:
     @pytest.mark.parametrize(
         ("audio_in_frame_source", "expect_mixed_cb"),
         [
-            (None, True),  # default mode is both
+            (None, True),  # default mode is mixed
             (AudioInFrameSource.MIXED, True),
             (AudioInFrameSource.BOTH, True),
             (AudioInFrameSource.INDIVIDUAL, False),
@@ -2109,7 +2109,7 @@ class TestVonageVideoConnectorTransport:
     @pytest.mark.parametrize(
         ("audio_in_frame_source", "expect_individual_cb"),
         [
-            (None, True),  # default mode is both
+            (None, False),  # default mode is mixed
             (AudioInFrameSource.MIXED, False),
             (AudioInFrameSource.INDIVIDUAL, True),
             (AudioInFrameSource.BOTH, True),
