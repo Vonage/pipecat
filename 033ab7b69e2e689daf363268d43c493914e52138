@@ -1,0 +1,9 @@
+pyproject.toml
+  s_14d05559f5d580::t_44be03776de940 132
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "033ab7b69e2e689daf363268d43c493914e52138",
+  "prompts": {}
+}

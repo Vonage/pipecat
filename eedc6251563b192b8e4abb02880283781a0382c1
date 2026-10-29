@@ -1,0 +1,19 @@
+changelog/4686.added.md
+  s_7ab3113fe9ed16::t_1dc8bc878096d6 3-4
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "eedc6251563b192b8e4abb02880283781a0382c1",
+  "prompts": {},
+  "sessions": {
+    "s_7ab3113fe9ed16": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_14c84fd67ffejBTiP3zV00juph",
+        "model": "auto"
+      },
+      "human_author": "asilvestre <antoni.silvestrepadros@vonage.com>"
+    }
+  }
+}

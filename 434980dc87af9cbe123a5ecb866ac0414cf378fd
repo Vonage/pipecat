@@ -1,0 +1,19 @@
+.github/workflows/release.yaml
+  s_527fa1626bec61::t_a358f6738fa62c 34-37,41-51,53,58
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "434980dc87af9cbe123a5ecb866ac0414cf378fd",
+  "prompts": {},
+  "sessions": {
+    "s_527fa1626bec61": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_14cc717a7ffeQPsP9MAJbzKcgr",
+        "model": "auto"
+      },
+      "human_author": "asilvestre <antoni.silvestrepadros@vonage.com>"
+    }
+  }
+}

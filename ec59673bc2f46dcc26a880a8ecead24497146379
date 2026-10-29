@@ -1,0 +1,25 @@
+src/pipecat/transports/vonage/client.py
+  s_6cc13cbcc7f081::t_7676bdded625d3 20
+  s_14d05559f5d580::t_bc03620136ec2c 90,95,117,154,264-265,793,800,817,1025-1027,1035,1094,1098,1101-1106
+  s_6cc13cbcc7f081::t_99f3674b046668 111,115-116
+  s_14d05559f5d580::t_f267786ad92684 124
+  s_6cc13cbcc7f081::t_fc9dbfa8a19b69 890-891
+  s_14d05559f5d580::t_5c37c53ac261ff 1056
+  s_14d05559f5d580::t_8857ee345b6343 46,1095-1097
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "ec59673bc2f46dcc26a880a8ecead24497146379",
+  "prompts": {},
+  "sessions": {
+    "s_14d05559f5d580": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_17af0b41fffeKro7Hpytf5mLd3",
+        "model": "claude-opus-4.6"
+      },
+      "human_author": "asilvestre <antoni.silvestrepadros@vonage.com>"
+    }
+  }
+}
