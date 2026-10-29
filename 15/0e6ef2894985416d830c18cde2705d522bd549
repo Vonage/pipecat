@@ -1,0 +1,19 @@
+.vonage/catalog-info.yaml
+  s_8a729749268422::t_2186e9d29b7c80 23
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "150e6ef2894985416d830c18cde2705d522bd549",
+  "prompts": {},
+  "sessions": {
+    "s_8a729749268422": {
+      "agent_id": {
+        "tool": "kiro",
+        "id": "sess_bfa681dd-0aa7-439e-9050-f42561e9808f",
+        "model": "auto"
+      },
+      "human_author": "adidomenico <alessio.didomenico@vonage.com>"
+    }
+  }
+}
